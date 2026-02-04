@@ -15,14 +15,6 @@ Official implementation of **ANO (Anchored Neighborhood Optimization)**.
 
 ---
 
-## ✅ Results at a Glance
-
-| Shape Function | Robustness Analysis | Win Rate |
-| :---: | :---: | :---: |
-| ![Performance 1](assets/shaping.png) | ![Performance 2](assets/mujoco_lr.png) | ![Performance 3](assets/winrate.png) |
-
----
-
 ## 📦 Environment Setup
 
 - Experimental coverage (as in paper): **LLM fine-tuning (RLHF)**.
@@ -36,7 +28,7 @@ Official implementation of **ANO (Anchored Neighborhood Optimization)**.
 
 ```bash
 git clone <YOUR_REPO_URL>
-cd ANO/
+cd ANO/RLHF
 
 conda env create -f ano_trl.yml
 conda activate ano_trl
