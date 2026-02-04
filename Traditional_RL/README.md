@@ -1,6 +1,7 @@
 # ANO
 ```
-git clone -b YihengZhang-dwbh-patch-1 https://github.com/YihengZhang-dwbh/ANO.git
+git clone https://github.com/YihengZhang-dwbh/ANO.git
+cd ANO/Traditional_RL
 ```
 
 ```
