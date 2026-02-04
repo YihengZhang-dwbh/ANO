@@ -18,8 +18,42 @@ import envpool
 import wandb
 
 # ============================================================================
-# [新功能] WandB 查重工具
+# [Optimization] ANO Math Kernel (JIT Compiled)
 # ============================================================================
+@torch.jit.script
+def _ano_math_kernel(x: torch.Tensor, k: float, b: float, const_term: float) -> torch.Tensor:
+    """
+    JIT compiled kernel for ANO math logic.
+    f0(x) = 45/16 * (0.5 * logsigmoid(2x) - 2 * sigmoid(x))
+    f_func = k * f0((x - b) / k) + const_term
+    """
+    term_x = (x - b) / k
+    # 45/16 = 2.8125
+    f0_val = 2.8125 * (0.5 * torch.nn.functional.logsigmoid(2 * term_x) - 2 * torch.sigmoid(term_x))
+    return k * f0_val + const_term
+
+@torch.jit.script
+def _compute_ano_loss(
+    mb_advantage: torch.Tensor, 
+    ratio: torch.Tensor, 
+    k_pos: float, b_pos: float, c_pos: float,
+    k_neg: float, b_neg: float, c_neg: float
+) -> torch.Tensor:
+    """
+    Computes the ANO loss efficiently using branch selection.
+    """
+    # Branch A: Positive Advantage Case -> f(r)
+    f_val_pos = _ano_math_kernel(ratio, k_pos, b_pos, c_pos)
+    
+    # Branch B: Negative Advantage Case -> 2 - f(2-r)
+    f_val_neg = 2.0 - _ano_math_kernel(2.0 - ratio, k_neg, b_neg, c_neg)
+    
+    # Selection: If Adv >= 0 use Pos branch, else use Neg branch
+    target_f_val = torch.where(mb_advantage >= 0, f_val_pos, f_val_neg)
+    
+    loss = -mb_advantage * target_f_val
+    return loss.mean()
+
 def get_run_info(args):
     """
     生成 Run Name
@@ -54,9 +88,6 @@ def check_wandb_run_exists(entity, project, group, name):
         print(f"⚠️  [WandB Check Error] {e} -> Proceeding...")
         return False
 
-# ============================================================================
-# [Wrapper 1] 原版 Wrapper (用于除 Atlantis 外的所有游戏)
-# ============================================================================
 class AtariScoreWrapper_Original(gym.Wrapper):
     def __init__(self, env):
         super().__init__(env)
@@ -94,9 +125,6 @@ class AtariScoreWrapper_Original(gym.Wrapper):
 
         return obs, reward, term, trunc, info
 
-# ============================================================================
-# [Wrapper 2] 修正版 Wrapper (仅用于 Atlantis)
-# ============================================================================
 class AtariScoreWrapper_Fixed(gym.Wrapper):
     def __init__(self, env):
         super().__init__(env)
@@ -146,23 +174,6 @@ class AtariScoreWrapper_Fixed(gym.Wrapper):
 
         return obs, reward, term, trunc, info
 
-# ============================================================================
-# ANO / TRPO / PAPO 核心数学工具
-# ============================================================================
-def f0(x):
-    return 45/16 * (0.5 * torch.nn.functional.logsigmoid(2*x) - 2 * torch.sigmoid(x))
-
-def f_func(x, d, device, epsilons):
-    ks = [epsilons[0]/math.log(2), epsilons[1]/math.log(2)]
-    bs = [1+epsilons[0], 1+epsilons[1]]
-    val_1 = torch.tensor(1.0, device=device)
-    term_d = 1/ks[d] * (val_1 - bs[d])
-    ds_d = ks[d] * f0(term_d)
-    term_x = (x - bs[d]) / ks[d]
-    f1_x = ks[d] * f0(term_x)
-    return f1_x + 1 - ds_d
-
-# [关键修复] 使用 .reshape(-1) 替代 .view(-1) 以支持非连续 Tensor
 def flat_grad(grads, params):
     grad_flatten = []
     for grad in grads:
@@ -172,7 +183,6 @@ def flat_grad(grads, params):
         grad_flatten.append(grad.reshape(-1)) 
     return torch.cat(grad_flatten)
 
-# [关键修复] 同理，flat_params 也建议用 reshape
 def flat_params(model):
     params = []
     for param in model.parameters():
@@ -213,9 +223,6 @@ def conjugate_gradient(fvp_func, b, cg_iters=10, residual_tol=1e-10):
         rdotr = new_rdotr
     return x
 
-# ============================================================================
-# 网络定义 (Standard Atari CNN)
-# ============================================================================
 class Agent(nn.Module):
     def __init__(self, envs):
         super().__init__()
@@ -251,9 +258,6 @@ class Agent(nn.Module):
     def get_logits(self, x):
         return self.actor(self.network(x / 255.0))
 
-# ============================================================================
-# 单次训练流程 (Training Loop)
-# ============================================================================
 def train_one_game(args):
     project_name, group_name, run_name = get_run_info(args)
         
@@ -277,9 +281,29 @@ def train_one_game(args):
     torch.backends.cudnn.deterministic = args.torch_deterministic
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
-    # ==============================================================
-    # [关键分支] 仅针对 Atlantis 启用特殊修复逻辑
-    # ==============================================================
+    # ====================================================================
+    # [Optimization] Pre-compute ANO Constants
+    # ====================================================================
+    if args.algo == "ANO":
+        # Positive side (using args.epsilons[0])
+        _eps_pos = args.epsilons[0]
+        _k_pos = _eps_pos / math.log(2)
+        _b_pos = 1.0 + _eps_pos
+        _term_d_pos = (1.0 - _b_pos) / _k_pos
+        _f0_val_pos = 2.8125 * (0.5 * math.log(1 / (1 + math.exp(-2 * _term_d_pos))) - 2 * (1 / (1 + math.exp(-_term_d_pos))))
+        _c_pos = 1.0 - (_k_pos * _f0_val_pos)
+
+        # Negative side (using args.epsilons[1])
+        _eps_neg = args.epsilons[1]
+        _k_neg = _eps_neg / math.log(2)
+        _b_neg = 1.0 + _eps_neg
+        _term_d_neg = (1.0 - _b_neg) / _k_neg
+        _f0_val_neg = 2.8125 * (0.5 * math.log(1 / (1 + math.exp(-2 * _term_d_neg))) - 2 * (1 / (1 + math.exp(-_term_d_neg))))
+        _c_neg = 1.0 - (_k_neg * _f0_val_neg)
+    else:
+        # Dummy values to prevent UnboundLocalError
+        _k_pos = _b_pos = _c_pos = _k_neg = _b_neg = _c_neg = 0.0
+
     if "Atlantis" in args.game_name:
         print(">>> Using FIXED Atlantis Logic (Max Steps + Fixed Wrapper) <<<")
         envs = envpool.make(
@@ -315,7 +339,6 @@ def train_one_game(args):
             seed=args.seed,
         )
         envs = AtariScoreWrapper_Original(envs) 
-    # ==============================================================
 
     envs.single_action_space = envs.action_space
     envs.single_observation_space = envs.observation_space
@@ -452,7 +475,6 @@ def train_one_game(args):
                     new_surrogate_loss = (ratio_eval * b_advantages).mean()
                     kl_val = get_kl_discrete(agent, b_obs, old_logits).mean()
 
-                # 在 Policy Update 的 Line Search 循环中：
                 if new_surrogate_loss > surrogate_loss and kl_val <= args.trpo_max_kl:
                     success = True
                     break
@@ -476,19 +498,10 @@ def train_one_game(args):
                     else:
                          v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
-                    # === [修复开始] ===
                     optimizer.zero_grad()
                     (v_loss * args.vf_coef).backward()
-                    
-                    # 裁剪 Critic 的梯度 (可选，但推荐)
                     nn.utils.clip_grad_norm_(agent.critic.parameters(), args.max_grad_norm)
-                    
-                    # [删除] 绝对不要在这里调用 agent.network.zero_grad() !!!
-                    # [删除] agent.network.zero_grad() 
-                    # [删除] agent.actor.zero_grad()
-                    
                     optimizer.step()
-                    # === [修复结束] ===
             
             pg_loss, v_loss, entropy_loss, approx_kl, clipfracs = surrogate_loss, v_loss, torch.tensor(0.0), kl_val, [0.0]
 
@@ -521,10 +534,12 @@ def train_one_game(args):
                         mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
                     if args.algo == "ANO":
-                        x = ratio
-                        term_p = f_func(x, 0, device, args.epsilons)
-                        term_n = 2.0 - f_func(2.0 - x, 1, device, args.epsilons)
-                        pg_loss = -torch.min(mb_advantages * term_p, mb_advantages * term_n).mean()
+                        # [Optimized] Call JIT compiled kernel directly
+                        pg_loss = _compute_ano_loss(
+                            mb_advantages, ratio,
+                            _k_pos, _b_pos, _c_pos,
+                            _k_neg, _b_neg, _c_neg
+                        )
                     
                     elif args.algo == "SPO":
                         pg_loss = -(mb_advantages * ratio - torch.abs(mb_advantages) * torch.pow(ratio - 1, 2) / (2 * args.clip_coef)).mean()
@@ -607,9 +622,6 @@ def train_one_game(args):
     writer.close()
     run.finish()
 
-# ============================================================================
-# Main 入口
-# ============================================================================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--algo", type=str, default="PPO", help="Options: PPO, ANO, SPO, TRPO, PAPO")
