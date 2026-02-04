@@ -36,7 +36,7 @@ Official implementation of **ANO (Anchored Neighborhood Optimization)**.
 
 ```bash
 git clone <YOUR_REPO_URL>
-cd ANO/
+cd ANO/RLHF
 
 conda env create -f ano_trl.yml
 conda activate ano_trl
