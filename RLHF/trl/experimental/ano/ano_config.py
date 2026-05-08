@@ -270,7 +270,7 @@ class ANOConfig(TrainingArguments):
         metadata={"help": "Whether to whiten the rewards."},
     )
     kl_coef: float = field(
-        default=0.05,
+        default=0.055,
         metadata={"help": "KL coefficient."},
     )
     kl_estimator: Literal["k1", "k3"] = field(
