@@ -46,27 +46,7 @@ conda activate ano_trl
 
 ## 🧪 Reproducing Experiments
 
-We provide **script entrypoints** for training and evaluation.
-
-### Training
-
-```bash
-bash bash_ano.sh
-```
-
-### Evaluation
-
-First, fill in the DeepSeek API key at line 437 of trl/experimental/judges/judges.py where it says ```api_key=""```. 
-
-Then, in judge.sh, complete the paths to the locally fine-tuned models you saved: set ```ano="your_anon_checkpoint-step"``` and ```ppo="your_ppo_checkpoint-step"```.
-
-Finally
-
-```bash
-bash judge.sh
-```
-
----
+See ANO/RLHF and ANO/Traditional_RL
 
 ## 📎 Citation
 
