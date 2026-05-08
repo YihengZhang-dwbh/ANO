@@ -90,8 +90,8 @@ Our evaluation will only take into account the first character of your answer, s
 
 @dataclass
 class ScriptArguments:
-    model_a_path: str = field(default="/home/yiheng/trl/models/minimal/ano_r", metadata={"help": "Path to Model A."})
-    model_b_path: str = field(default="/home/yiheng/trl/models/minimal/ppo_r", metadata={"help": "Path to Model B."})
+    model_a_path: str = field(default="models/minimal/ano_r", metadata={"help": "Path to Model A."})
+    model_b_path: str = field(default="models/minimal/ppo_r", metadata={"help": "Path to Model B."})
     judge_model: str = field(default="deepseek", metadata={"help": "Judge model type."})
     num_examples: int | None = field(default=100, metadata={"help": "Number of examples to evaluate."})
     batch_size: int = field(default=8, metadata={"help": "Batch size."})
