@@ -68,6 +68,8 @@ _import_structure = {
         "GKDTrainer",  # deprecated import
         "GRPOConfig",
         "GRPOTrainer",
+        "GANOConfig",
+        "GANOTrainer",
         "HfPairwiseJudge",  # deprecated import
         "KTOConfig",
         "KTOTrainer",
@@ -83,6 +85,10 @@ _import_structure = {
         "PairRMJudge",  # deprecated import
         "PPOConfig",  # deprecated import
         "PPOTrainer",  # deprecated import
+        "ANOConfig",  # deprecated import
+        "ANOTrainer",  # deprecated import
+        "SPOConfig",  # deprecated import
+        "SPOTrainer",  # deprecated import
         "PRMConfig",  # deprecated import
         "PRMTrainer",  # deprecated import
         "RewardConfig",
@@ -146,6 +152,8 @@ if TYPE_CHECKING:
         GKDTrainer,  # deprecated import
         GRPOConfig,
         GRPOTrainer,
+        GANOConfig,
+        GANOTrainer,
         HfPairwiseJudge,  # deprecated import
         KTOConfig,
         KTOTrainer,
@@ -161,6 +169,10 @@ if TYPE_CHECKING:
         PairRMJudge,  # deprecated import
         PPOConfig,  # deprecated import
         PPOTrainer,  # deprecated import
+        ANOConfig,  # deprecated import
+        ANOTrainer,  # deprecated import
+        SPOConfig,  # deprecated import
+        SPOTrainer,  # deprecated import
         PRMConfig,  # deprecated import
         PRMTrainer,  # deprecated import
         RewardConfig,
