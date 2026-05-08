@@ -36,6 +36,8 @@ _import_structure = {
     "gkd_trainer": ["GKDTrainer"],  # deprecated import
     "grpo_config": ["GRPOConfig"],
     "grpo_trainer": ["GRPOTrainer"],
+    "gano_config": ["GANOConfig"],
+    "gano_trainer": ["GANOTrainer"],
     "judges": [
         "AllTrueJudge",  # deprecated import
         "BaseBinaryJudge",  # deprecated import
@@ -97,6 +99,8 @@ if TYPE_CHECKING:
     from .gkd_trainer import GKDTrainer  # deprecated import
     from .grpo_config import GRPOConfig
     from .grpo_trainer import GRPOTrainer
+    from .gano_config import GANOConfig
+    from .gano_trainer import GANOTrainer
     from .judges import (
         AllTrueJudge,  # deprecated import
         BaseBinaryJudge,  # deprecated import
