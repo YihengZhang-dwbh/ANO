@@ -1,82 +1,54 @@
-# ANO: A Unified RL Framework for Robust Policy Optimization
+# ANO — RLHF Implementation (TRL fork)
 
-Official implementation of **ANO (Anchored Neighborhood Optimization)**.
-> **Code Release:** This repository contains the reference implementation used in our experiments.
+On-policy RLHF trainers and the LLM-judge evaluation pipeline used in the
+paper's Reddit TL;DR experiments (Pythia-1B policy + reward model, 1M episodes).
 
----
+## What's here
 
-## 🔥 What is ANO?
+- **On-policy trainers**: `experimental/ano`, `experimental/papo`,
+  `experimental/spo`, `experimental/ppo` (mirrored under `trl/experimental/*`
+  for direct `import` use). ANO exposes the same three knobs as the paper:
+  trust-region boundary `eps`, `kappa_plus` (default 10), `kappa_minus`
+  (default −1.5).
+- **LLM-judge evaluation**: `judge.py` / `judge.sh` (single-score judging) and
+  `judge_rubric.py` / `bash_judge_rubric.sh` (four-dimension 1–10 rubric,
+  300 held-out prompts, greedy decoding; raw judge outputs are kept in
+  `rubric_results/`).
 
-**Proximal Policy Optimization (PPO)** is widely used but faces a fundamental dilemma:
-- **Hard clipping** discards useful gradient information from outliers → hurts sample efficiency.
-- **Removing clipping** can lead to unbounded gradients → instability and hyper-parameter sensitivity.
-
-**ANO** resolves this via a **Unified Trust Region Framework** and a new shaping principle: **redescending influence** — suppress extreme outliers smoothly while keeping informative gradients in moderately-off-policy regions.  It is designed to be **smooth**, **trust-region bounded**, **robust to outliers**, and **structurally minimal** (one convexity change).  
-
----
-
-## ✅ Results at a Glance
-
-| Shape Function | Robustness Analysis | Win Rate |
-| :---: | :---: | :---: |
-| ![Performance 1](assets/shaping.png) | ![Performance 2](assets/mujoco_lr.png) | ![Performance 3](assets/winrate.png) |
-
----
-
-## 📦 Environment Setup
-
-- Experimental coverage (as in paper): **LLM fine-tuning (RLHF)**.
-
-**Tested with**
-- OS: Ubuntu 20.04
-- Python: 3.8+
-- CUDA: optional (recommended for large-scale / LLM experiments)
-
-### Clone & create Conda env
+## Quick start
 
 ```bash
 git clone <YOUR_REPO_URL>
-cd ANO/
+cd ANO/RLHF
 
-conda env create -f ano_trl.yml
+conda env create -f ano_trl.yaml
 conda activate ano_trl
-````
 
----
+bash bash_ano.sh            # ANO training
+# baselines:
+bash bash_ppo.sh
+bash bash_grpo.sh
 
-## 🧪 Reproducing Experiments
-
-We provide **script entrypoints** for training and evaluation.
-
-### Training
-
-```bash
-bash bash_ano.sh
+bash bash_judge_rubric.sh   # evaluate trained checkpoints with the LLM judge
 ```
 
-### Evaluation
+The judge is an external LLM accessed through an OpenAI-compatible API;
+configure the endpoint and key via environment variables (`OPENAI_API_KEY`,
+`OPENAI_BASE_URL`).
 
-```bash
-bash judge.sh
-```
-
----
-
-## 📎 Citation
-
-If you use this codebase, please cite:
+## Citation
 
 ```bibtex
-
+@inproceedings{Anonymous2027ano,
+  title     = {ANO: Robust Policy Optimization via Bounded, Redescending Gain Fields},
+  author    = {Anonymous authors},
+  booktitle = {Under review},
+  year      = {2027}
+}
 ```
 
----
+## Acknowledgements
 
-## 🙏 Acknowledgements
-
-This repository builds upon and uses code from:
-
-* **TRL** (Transformer Reinforcement Learning): [https://github.com/huggingface/trl](https://github.com/huggingface/trl)
-
-Please refer to their licenses and cite them if you build upon their work.
-
+This directory builds upon [TRL](https://github.com/huggingface/trl)
+(Transformer Reinforcement Learning); please refer to its license and cite it
+if you build upon its work.
