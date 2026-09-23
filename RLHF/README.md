@@ -10,10 +10,9 @@ paper's Reddit TL;DR experiments (Pythia-1B policy + reward model, 1M episodes).
   for direct `import` use). ANO exposes the same three knobs as the paper:
   trust-region boundary `eps`, `kappa_plus` (default 10), `kappa_minus`
   (default −1.5).
-- **LLM-judge evaluation**: `judge.py` / `judge.sh` (single-score judging) and
-  `judge_rubric.py` / `bash_judge_rubric.sh` (four-dimension 1–10 rubric,
-  300 held-out prompts, greedy decoding; raw judge outputs are kept in
-  `rubric_results/`).
+- **LLM-judge evaluation**: `judge_rubric.py` / `bash_judge_rubric.sh`
+  (four-dimension 1–10 rubric, 300 held-out prompts, greedy decoding; raw
+  judge outputs are kept in `rubric_results/`).
 
 ## Quick start
 

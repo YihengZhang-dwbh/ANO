@@ -2,13 +2,13 @@
 # Pairs: ANO(0.2,10,-1.5) vs PPO(0.2), ANO vs SPO(0.2); decoding temps 0/0.7/1.0,
 # 300 TL;DR test prompts, independent 1-10 rubric judging via DeepSeek.
 
-#conda config --add envs_dirs /mnt/share/yiheng/miniconda3/envs
+#conda config --add envs_dirs <YOUR_CONDA_ENVS_DIR>
 #source activate ano_trl
 
 export CUDA_VISIBLE_DEVICES=3
-export OPENAI_API_KEY="sk-your-deepseek-key"   # same key judge.py uses
+export OPENAI_API_KEY="sk-your-deepseek-key"   # your DeepSeek API key
 
-BASE=/mnt/share/yiheng/TRL/models/minimal
+BASE=/path/to/trained/models
 checkpoint=12000
 
 ano="$BASE/ano_tldr_0.2_10_-1.5/checkpoint-$checkpoint"
