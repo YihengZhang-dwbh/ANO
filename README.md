@@ -26,9 +26,9 @@ The gain field is a difference of two logistic sigmoids:
 G'(x) = κ₊ · ν · (1 − E) / [ (1 + E)(E + ν) ],   E = e^{a(x − x₀)},  x₀ = 1 + ε
 ```
 
-<p align="center"><img src="assets/shaping_kernel.png" width="880" alt="Shaping functions and gain fields of PPO, SPO, and ANO"></p>
+<p align="center"><img src="assets/shaping_kernel.png" width="880" alt="Geometry and induced dynamics of PPO, SPO, and ANO surrogate objectives"></p>
 
-*(a) Shaping functions and (b) gain fields (display config ε = 0.2, κ₊ = 10, κ₋ = −1.5): PPO's hard clip creates a zero-gain dead zone beyond 1 + ε; SPO's quadratic penalty yields an unbounded, linearly growing gain; ANO's gain is bounded, redescends to its pull floor κ₋ at r = x_p, and decays to zero for extreme outliers. Figure generated from `ano/g_shaping.py` via `python assets/plot_kernel.py`.*
+*Geometry and induced dynamics of the surrogate objectives (display config ε = 0.2, κ₊ = 2, κ₋ = −0.5, same display config as the paper's Figure 1): **(a)** shaping functions — PPO kinks flat (hard clip), SPO is unbounded (quadratic), ANO is tangent to the identity at (1, 1) with a bounded-slope left tail (→ κ₊), a peak at 1 + ε, and a right tail flattening to slope 0; **(b)** induced feedback gain κ(r) = f′(r) — PPO's dead zone beyond 1 + ε, SPO's unbounded linear gain, ANO's bounded gain with saturated push κ₊, pull floor κ₋ at r = x_p, and redescendence to 0; **(c)** ratio-space phase lines for A > 0 — PPO's flow stalls at the boundary (open-loop drift), SPO's restoring force stays strong far from equilibrium, ANO's weakens past the stable fixed point 1 + ε. Generated from `ano/g_shaping.py` via `python assets/plot_kernel.py`.*
 
 | Knob | Meaning | Paper default |
 | :--- | :--- | :--- |
