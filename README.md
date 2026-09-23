@@ -1,7 +1,6 @@
 # ANO: Robust Policy Optimization via Bounded, Redescending Gain Fields
 
 Official implementation of **ANO (Anchored Neighborhood Optimization)**.
-> This repository contains the reference implementation used in our experiments. The paper is under double-blind review; code snapshot: https://anonymous.4open.science/r/ano-F818
 
 ---
 
