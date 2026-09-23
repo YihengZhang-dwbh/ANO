@@ -1,15 +1,14 @@
+#!/bin/bash
+# PPO baseline on Reddit TL;DR (Pythia-1B): 1M episodes, deepspeed zero2.
 time=$(date '+%Y-%m-%d-%H%M%S')
 start_time=$(date +%s)
 
 source activate ano_trl
 
-
 id=3
-time=$(date '+%Y-%m-%d-%H%M%S')
 /bin/echo "${id} PPO"
 export CUDA_VISIBLE_DEVICES=$id
-# CUDA_VISIBLE_DEVICES=$id 
-echo "Starting PPO with Reduced Batch Size (8)..."
+echo "Starting PPO..."
 accelerate launch \
     --config_file examples/accelerate_configs/deepspeed_zero2.yaml \
     --num_processes 1 \
@@ -27,11 +26,6 @@ accelerate launch \
     --missing_eos_penalty 1.0 \
     --stop_token eos \
     --dataset_name "TRL-Lib/tldr" > train_PPO_$time.txt 2>&1
-
-
-    #!/bin/bash
-
-
 
 end_time=$(date +%s)
 duration=$((end_time - start_time))

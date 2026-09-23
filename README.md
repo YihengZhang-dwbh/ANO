@@ -69,8 +69,8 @@ ano/              Reference implementation of the shaping kernel (numpy)
 git clone <YOUR_REPO_URL>
 cd ANO/Traditional_RL
 # see README.md there for the conda environment ("ano_rl")
-bash bash_atari_ano.sh     # Atari, ANO  (PPO/SPO/TRPO variants included)
-bash bash_mujoco_ano.sh    # MuJoCo, ANO
+bash bash_atari_ano.sh     # Atari, ANO  (PPO/SPO/TRPO/PAPO variants included)
+bash bash_mujoco_ano.sh    # MuJoCo, ANO (PPO/SPO/TRPO/PAPO variants included)
 ```
 
 ANO hyperparameters (paper notation) map to CLI flags as follows:
@@ -87,7 +87,7 @@ python atari.py --algo ANO --epsilons 0.2 0.2 \
 ```bash
 cd ANO/RLHF
 conda env create -f ano_trl.yaml && conda activate ano_trl
-bash bash_ano.sh     # ANO   (bash_ppo.sh / bash_grpo.sh for baselines)
+bash bash_ano.sh     # ANO   (bash_ppo.sh / bash_spo.sh for baselines)
 bash bash_judge_rubric.sh   # LLM-judge evaluation of the trained checkpoints
 ```
 

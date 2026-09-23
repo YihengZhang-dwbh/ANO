@@ -26,7 +26,7 @@ conda activate ano_trl
 bash bash_ano.sh            # ANO training
 # baselines:
 bash bash_ppo.sh
-bash bash_grpo.sh
+bash bash_spo.sh
 
 bash bash_judge_rubric.sh   # evaluate trained checkpoints with the LLM judge
 ```

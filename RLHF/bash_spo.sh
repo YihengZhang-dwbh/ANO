@@ -1,39 +1,31 @@
+#!/bin/bash
+# SPO baseline on Reddit TL;DR (Pythia-1B): 1M episodes, deepspeed zero2.
 time=$(date '+%Y-%m-%d-%H%M%S')
 start_time=$(date +%s)
 
 source activate ano_trl
 
-
 id=3
-
-time=$(date '+%Y-%m-%d-%H%M%S')
-/bin/echo "${id} GRPO"
+/bin/echo "${id} SPO"
 export CUDA_VISIBLE_DEVICES=$id
-# CUDA_VISIBLE_DEVICES=$id 
-echo "Starting GRPO with Reduced Batch Size (8)..."
+echo "Starting SPO..."
 accelerate launch \
     --config_file examples/accelerate_configs/deepspeed_zero2.yaml \
     --num_processes 1 \
-    examples/scripts/grpo/grpo_tldr.py \
-    --output_dir models/minimal/gano_tldr_${time} \
+    examples/scripts/spo/spo_tldr.py \
+    --num_sample_generations 0 \
+    --output_dir models/minimal/spo_tldr \
     --learning_rate 3e-6 \
-    --per_device_train_batch_size 16 \
-    --num_generations 4 \
-    --gradient_accumulation_steps 4 \
-    --num_iterations 1 \
-    --max_steps 15625 \
-    --model_name_or_path cleanrl/EleutherAI_pythia-1b-deduped__sft__tldr \
+    --per_device_train_batch_size 8 \
+    --gradient_accumulation_steps 8 \
+    --total_episodes 1000000 \
+    --model_name_or_path EleutherAI/pythia-1b-deduped \
+    --sft_model_path cleanrl/EleutherAI_pythia-1b-deduped__sft__tldr \
     --reward_model_path cleanrl/EleutherAI_pythia-1b-deduped__reward__tldr \
-    --dataset_name "TRL-Lib/tldr" \
-    --beta 0.05 \
-    --max_prompt_length 512 \
-    --max_completion_length 53 > train_GRPO_${time}.txt 2>&1
-
-
-
-    #!/bin/bash
-
-
+    --local_rollout_forward_batch_size 8 \
+    --missing_eos_penalty 1.0 \
+    --stop_token eos \
+    --dataset_name "TRL-Lib/tldr" > train_SPO_$time.txt 2>&1
 
 end_time=$(date +%s)
 duration=$((end_time - start_time))
