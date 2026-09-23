@@ -20,64 +20,74 @@ import wandb
 # ============================================================================
 # [ANO] G(x) shaping kernel (JIT compiled)
 #
-# 数学来源见 C:\Code\ICLR_ANO\show_rate.py 与 construction.tex（同一构造，这
-# 里是它的 torch 版，与 RLHF/experimental/ano/g_shaping.py 完全一致，只是内联
-# 到这个独立脚本里，因为它不是一个可 import 的包）。
+# The construction is described in the paper (see paper Eq. (9) and
+# Section 4.2; the same construction appears in
+# RLHF/experimental/ano/g_shaping.py, and is inlined here as a torch version
+# because this standalone script is not an importable package).
 #
-# 旧核 f0 = 45/16*(0.5*logsigmoid(2x)-2*sigmoid(x)) 只有一个自由度（复用
-# epsilon）；塑形函数扮演的角色与旧核一致：直接替换 PPO 里 clip(ratio) 的
-# 位置，f(1)=1、f'(1)=1（切于 y=x）、且在 x=1+eps 处取**局部极大值**。这些
-# 边界条件对应的是 G(x) 本身（G(1)=1, G'(1)=1, G 在 1+eps 处局部极大），
-# **不是** G'(x)（早前版本在这里写错了，把 G' 当塑形函数塞了进去）。
+# The old kernel f0 = 45/16*(0.5*logsigmoid(2x)-2*sigmoid(x)) has only one
+# degree of freedom (reusing epsilon); the shaping function plays the same
+# role as the old kernel: it directly replaces clip(ratio) in PPO, with
+# f(1)=1, f'(1)=1 (tangent to y=x), and a **local maximum** at x=1+eps.
+# These boundary conditions apply to G(x) itself (G(1)=1, G'(1)=1, G has a
+# local maximum at 1+eps), **not** G'(x) (an earlier version got this wrong
+# by plugging G' in as the shaping function).
 #
-#     G(x) = 1 + (y1/a) * [ bracket(a(x-x0)) - bracket(a(1-x0)) ]
-#     bracket(z) = z + log(1-u) + ((r+1)/(r-1)) * log(u+r(1-u))   (r != 1)
-#     bracket(z) = z + log(1-u) + 2*(1-u)                         (r == 1，极限)
+#     G(x) = 1 + (kappa_plus/a) * [ bracket(a(x-x0)) - bracket(a(1-x0)) ]
+#     bracket(z) = z + log(1-u) + ((nu+1)/(nu-1)) * log(u+nu(1-u))   (nu != 1)
+#     bracket(z) = z + log(1-u) + 2*(1-u)                         (nu == 1, limit)
 #     u = sigmoid(z)
 #
-# 三个独立超参 (eps, y1, b)：eps 是零点偏移（与旧核相同语义），y1 是
-# G'(-inf)（"最大推力"），b 是 G' 的全局最小值（"最大拉力"），且 b 与 y1
-# 完全解耦（不像旧核只有一个自由度）。(r, a, x0) 在训练开始前用闭式（二次
-# 方程正根 + 显式深度反解）解一次，训练循环里只做逐元素初等运算，不含任何
-# 求根，用 torch.jit.script 保持与旧核一致的性能特征。
+# The three independent hyperparameters (eps, kappa_plus, kappa_minus): eps
+# is the zero-crossing offset (same semantics as the old kernel), kappa_plus
+# is G'(-inf) ("maximal push"), kappa_minus is the global minimum of G'
+# ("maximal pull"), and kappa_minus is fully decoupled from kappa_plus (unlike
+# the old kernel which had only one degree of freedom). (nu, a, x0) are solved
+# once in closed form before training (positive root of a quadratic + explicit
+# depth inversion); the training loop only performs elementwise elementary
+# operations with no root-finding, and torch.jit.script keeps the performance
+# characteristics consistent with the old kernel.
 # ============================================================================
 
-def _g_shaping_r_of_b(y1: float, b: float) -> float:
-    """由 (y1, b) 闭式反解形状参数 r。要求 -y1 < b < 0（构造的精确可达范围）。"""
-    if not (y1 > 1.0):
-        raise ValueError(f"ano_y1 must be > 1, got {y1}")
-    if not (-y1 < b < 0.0):
-        raise ValueError(f"ano_b must satisfy -ano_y1 < ano_b < 0 (got ano_b={b}, ano_y1={y1})")
-    d = -b / y1
+def _g_shaping_r_of_kappa_minus(kappa_plus: float, kappa_minus: float) -> float:
+    """Closed-form inversion of the shape parameter nu from (kappa_plus, kappa_minus).
+    Requires -kappa_plus < kappa_minus < 0 (the exact reachable range of the construction)."""
+    if not (kappa_plus > 1.0):
+        raise ValueError(f"ano_kappa_plus must be > 1, got {kappa_plus}")
+    if not (-kappa_plus < kappa_minus < 0.0):
+        raise ValueError(f"ano_kappa_minus must satisfy -ano_kappa_plus < ano_kappa_minus < 0 (got ano_kappa_minus={kappa_minus}, ano_kappa_plus={kappa_plus})")
+    d = -kappa_minus / kappa_plus
     s = (2.0 * d + math.sqrt(2.0 * (d + 1.0))) / (1.0 - d)
     return 0.5 * (s * s - 2.0)
 
 
-def _g_shaping_a_of_scale(eps: float, y1: float, r: float) -> float:
-    """由 (eps, y1, r) 闭式解标度 a（二次方程的正根，共轭形式避免相消）。"""
+def _g_shaping_a_of_scale(eps: float, kappa_plus: float, r: float) -> float:
+    """Closed-form solution for the scale a from (eps, kappa_plus, nu)
+    (positive root of a quadratic, conjugate form to avoid cancellation)."""
     if not (eps > 0.0):
         raise ValueError(f"epsilon must be > 0, got {eps}")
-    B = r * (y1 + 1.0) + 1.0
-    C = r * (y1 - 1.0)
+    B = r * (kappa_plus + 1.0) + 1.0
+    C = r * (kappa_plus - 1.0)
     q = 2.0 * C / (B + math.sqrt(B * B + 4.0 * C))
     return -math.log(q) / eps
 
 
-def solve_g_shaping_constants(eps: float, y1: float, b: float):
-    """训练开始前调用一次：由 (eps, y1, b) 解出 (r, a, x0)。"""
-    r = _g_shaping_r_of_b(y1, b)
-    a = _g_shaping_a_of_scale(eps, y1, r)
+def solve_g_shaping_constants(eps: float, kappa_plus: float, kappa_minus: float):
+    """Call once before training: solve (nu, a, x0) from (eps, kappa_plus, kappa_minus)."""
+    r = _g_shaping_r_of_kappa_minus(kappa_plus, kappa_minus)
+    a = _g_shaping_a_of_scale(eps, kappa_plus, r)
     return r, a, 1.0 + eps
 
 
 @torch.jit.script
-def g_shaping_kernel(x: torch.Tensor, r: float, a: float, x0: float, y1: float) -> torch.Tensor:
-    """G(x)，塑形函数本身（替代旧 _ano_math_kernel）。**不是** G'(x)。
+def g_shaping_kernel(x: torch.Tensor, r: float, a: float, x0: float, kappa_plus: float) -> torch.Tensor:
+    """G(x), the shaping function itself (replaces the old _ano_math_kernel). **Not** G'(x).
 
-    见上面模块头的公式；数值上用 u=sigmoid(z) 代替 E=e^z 避免溢出，
-    log(1-u) 用稳定的 -softplus(z) 求。已用 sympy 符号验证 + 数值网格
-    对照 show_rate.py（见 RLHF/experimental/ano/g_shaping.py 的 _selftest，
-    完全同构，这里为了跑在独立脚本里改成了内联版）。
+    See the module header formula above; numerically u=sigmoid(z) replaces
+    E=e^z to avoid overflow, and log(1-u) is computed stably as -softplus(z).
+    Symbolically verified by sympy plus numerical grid check against the
+    reference (see the _selftest in RLHF/experimental/ano/g_shaping.py, fully
+    isomorphic; here it is inlined to run in a standalone script).
     """
     z = a * (x - x0)
     z1 = a * (1.0 - x0)
@@ -97,30 +107,32 @@ def g_shaping_kernel(x: torch.Tensor, r: float, a: float, x0: float, y1: float) 
         bracket = z + log_1mu + c3 * torch.log(denom)
         bracket1 = z1 + log_1mu1 + c3 * math.log(denom1)
 
-    return 1.0 + (y1 / a) * (bracket - bracket1)
+    return 1.0 + (kappa_plus / a) * (bracket - bracket1)
 
 
 @torch.jit.script
 def _compute_ano_loss(
     mb_advantage: torch.Tensor,
     ratio: torch.Tensor,
-    r: float, a: float, x0: float, y1: float,
+    r: float, a: float, x0: float, kappa_plus: float,
 ) -> torch.Tensor:
     """
     Computes the ANO loss efficiently using branch selection.
 
-    与旧版完全一致的正负 Adv 分支组合方式（核心函数换成了 G，不是 G'）：
+    The positive/negative-advantage branch combination is exactly the same as
+    the old version (only the core function changed from G' to G):
         Adv >= 0: loss = -Adv * G(r)
         Adv <  0: loss = -Adv * [2 - G(2-r)]
 
-    这里的常数 "2" 不需要按 y1 缩放：G 与旧核共享同一个锚点 G(1)=1，
-    对偶 g(x)=2-G(2-x) 只需 g(1)=2-G(1)=2-1=1，用常数 2 就精确满足。
+    The constant "2" here does not need to be scaled by kappa_plus: G shares
+    the same anchor G(1)=1 with the old kernel, and the dual g(x)=2-G(2-x)
+    only needs g(1)=2-G(1)=2-1=1, which the constant 2 satisfies exactly.
     """
     # Branch A: Positive Advantage Case -> G(r)
-    f_val_pos = g_shaping_kernel(ratio, r, a, x0, y1)
+    f_val_pos = g_shaping_kernel(ratio, r, a, x0, kappa_plus)
 
     # Branch B: Negative Advantage Case -> 2 - G(2-r)
-    f_val_neg = 2.0 - g_shaping_kernel(2.0 - ratio, r, a, x0, y1)
+    f_val_neg = 2.0 - g_shaping_kernel(2.0 - ratio, r, a, x0, kappa_plus)
 
     # Selection: If Adv >= 0 use Pos branch, else use Neg branch
     target_f_val = torch.where(mb_advantage >= 0, f_val_pos, f_val_neg)
@@ -129,21 +141,25 @@ def _compute_ano_loss(
     return loss.mean()
 
 # ============================================================================
-# [New Feature] WandB Check
+# [New Feature] WandB duplicate-run check
 # ============================================================================
 def get_run_info(args):
     """
-    生成 Run Name
+    Generate Run Name
 
-    group = tag （同组实验共享一个 group，跨 seed 聚合曲线）
-    run   = tag + seed （唯一标识单次运行，用于 WandB 查重）
+    group = tag (experiments in the same group share a group; curves are
+    aggregated across seeds)
+    run   = tag + seed (uniquely identifies a single run, used for WandB
+    duplicate detection)
     """
     project_name = f"MuJoCo_{args.env_id}_G4"
 
     if args.algo == "ANO":
-        # 超参顺序: eps(epsilons[0]) / y1 / b —— 三者唯一确定 G(x) 形状
-        # :g 去掉无意义尾零（3.0→3、-1.0→-1），保持紧凑且不与分隔符 _ 混淆
-        tag = f"TANO_{args.epsilons[0]:g}_{args.ano_y1:g}_{args.ano_b:g}"
+        # Hyperparameter order: eps(epsilons[0]) / kappa_plus / kappa_minus --
+        # these three uniquely determine the shape of G(x)
+        # :g strips meaningless trailing zeros (3.0->3, -1.0->-1), keeping the
+        # tag compact and unambiguous with the _ separator
+        tag = f"TANO_{args.epsilons[0]:g}_{args.ano_kappa_plus:g}_{args.ano_kappa_minus:g}"
     elif args.algo == "TRPO":
         tag = f"TTRPO_{args.trpo_max_kl}"
     elif args.algo == "PAPO":
@@ -427,11 +443,11 @@ def train_one_game(args):
     # [ANO] Pre-compute G(x) shaping constants (closed form, solved once)
     # ====================================================================
     if args.algo == "ANO":
-        _g_r, _g_a, _g_x0 = solve_g_shaping_constants(args.epsilons[0], args.ano_y1, args.ano_b)
-        _g_y1 = args.ano_y1
+        _g_r, _g_a, _g_x0 = solve_g_shaping_constants(args.epsilons[0], args.ano_kappa_plus, args.ano_kappa_minus)
+        _g_kappa_plus = args.ano_kappa_plus
     else:
         # Dummy values to prevent UnboundLocalError if algo is not ANO
-        _g_r = _g_a = _g_x0 = _g_y1 = 0.0
+        _g_r = _g_a = _g_x0 = _g_kappa_plus = 0.0
 
     # --- Env Setup ---
     num_cpus = os.cpu_count() or 4
@@ -526,7 +542,7 @@ def train_one_game(args):
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
 
-        # [诊断] 收集本 update 所有 minibatch 的 ratio，用于分位数统计
+        # [diagnostic] collect ratios from all minibatches of this update for quantile statistics
         diag_ratios = []
 
         # ====================================================================
@@ -667,12 +683,12 @@ def train_one_game(args):
                         with torch.no_grad():
                             old_approx_kl = (-logratio).mean()
                             approx_kl = ((ratio - 1) - logratio).mean()
-                            # ANO 的"边界"由 epsilons[0] 定义（零交叉点），而非 clip_coef
+                            # ANO's "boundary" is defined by epsilons[0] (zero-crossing point), not clip_coef
                             clipfracs += [((ratio - 1.0).abs() > args.epsilons[0]).float().mean().item()]
                         # [Optimized] Call JIT compiled G(x) shaping kernel directly
                         pg_loss = _compute_ano_loss(
                             mb_advantages, ratio,
-                            _g_r, _g_a, _g_x0, _g_y1,
+                            _g_r, _g_a, _g_x0, _g_kappa_plus,
                         )
                     
                     elif args.algo == "SPO":
@@ -860,10 +876,10 @@ if __name__ == "__main__":
     parser.add_argument("--cuda", type=lambda x: bool(strtobool(x)), default=True)
     parser.add_argument("--torch-deterministic", type=lambda x: bool(strtobool(x)), default=True)
     parser.add_argument("--epsilons", type=float, nargs='+', default=[0.2, 0.2])
-    parser.add_argument("--ano-y1", type=float, default=3.0,
-                         help="G(x) shaping function saturation level as x->-inf ('maximal push'); must be > 1.")
-    parser.add_argument("--ano-b", type=float, default=-1.0,
-                         help="G(x) shaping function's global min of G' ('maximal pull'); must satisfy -ano_y1 < ano_b < 0.")
+    parser.add_argument("--ano-kappa-plus", type=float, default=10.0,
+                         help="G(x) shaping function saturation level as x->-inf ('maximal push', paper kappa+); must be > 1.")
+    parser.add_argument("--ano-kappa-minus", type=float, default=-1.5,
+                         help="G(x) shaping function's global min of G' ('maximal pull', paper kappa-); must satisfy -ano_kappa_plus < ano_kappa_minus < 0.")
     parser.add_argument("--anneal-lr", type=bool, default=True)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)

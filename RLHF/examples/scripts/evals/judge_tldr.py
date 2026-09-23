@@ -98,7 +98,7 @@ if __name__ == "__main__":
 
     # Judge the outputs
     if "deepseek" in script_args.judge_model:
-        # 强制指定 base_url
+        # Force the base_url
         judge = OpenAIPairwiseJudge(script_args.judge_model, base_url="https://api.deepseek.com/v1")
     elif "gpt" in script_args.judge_model:
         judge = OpenAIPairwiseJudge(script_args.judge_model)

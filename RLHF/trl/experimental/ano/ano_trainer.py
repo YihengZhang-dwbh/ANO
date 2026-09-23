@@ -75,12 +75,14 @@ if is_peft_available():
 INVALID_LOGPROB = 1.0
 
 
-# ANO 塑形函数的数学核（G(x) 及其正负 Adv 双支损失）现在都在 g_shaping.py 里，
-# 用 [[C:\Code\ICLR_ANO\show_rate.py]] 里推导并验证过的 G(x) 构造替换了原来
-# 固定形状的 f0 = 45/16*(0.5*logsigmoid(2x)-2*sigmoid(x)) 核。旧核只有一个
-# 超参（复用 cliprange），新核有三个独立超参 (eps=cliprange, y1, b)，其中
-# y1 是 x->-inf 的饱和梯度、b 是导数的全局最小值，两者完全解耦。
-# 详见 solve_g_shaping_constants 与 _compute_g_loss 的 docstring。
+# The ANO shaping function's mathematical kernel (G(x) and its positive/negative Adv dual-branch
+# loss) now lives in g_shaping.py. The G(x) construction derived and validated in the paper
+# (Eq. (9), Section 4.2) replaces the original fixed-shape
+# f0 = 45/16*(0.5*logsigmoid(2x)-2*sigmoid(x)) kernel. The old kernel had only one hyperparameter
+# (reusing cliprange); the new kernel has three independent hyperparameters
+# (eps=cliprange, kappa_plus, kappa_minus), where kappa_plus is the saturated gradient as
+# x -> -inf and kappa_minus is the global minimum of the derivative; the two are fully decoupled.
+# See the docstrings of solve_g_shaping_constants and _compute_g_loss for details.
 
 def generate(
     lm_backbone: torch.nn.Module, queries: torch.Tensor, pad_token_id: int, generation_config: GenerationConfig
@@ -606,12 +608,12 @@ class ANOTrainer(BaseTrainer):
         device = accelerator.device
 
         # [PRE-COMPUTE CONSTANTS ONCE] - solve the G(x) shaping function's (r, a, x0)
-        # from the three independent hyperparameters (eps=cliprange, y1, b). This is a
-        # closed-form solve (quadratic root + explicit depth inversion, see
+        # from the three independent hyperparameters (eps=cliprange, kappa_plus, kappa_minus).
+        # This is a closed-form solve (quadratic root + explicit depth inversion, see
         # g_shaping.solve_g_shaping_constants) — no iteration, done once before the
         # training loop, not per batch and not per step.
-        _g_r, _g_a, _g_x0 = solve_g_shaping_constants(args.cliprange, args.ano_y1, args.ano_b)
-        _g_y1 = args.ano_y1
+        _g_r, _g_a, _g_x0 = solve_g_shaping_constants(args.cliprange, args.ano_kappa_plus, args.ano_kappa_minus)
+        _g_kappa_plus = args.ano_kappa_plus
 
         def repeat_generator():
             while True:
@@ -846,7 +848,7 @@ class ANOTrainer(BaseTrainer):
                             # Use the JIT compiled G(x) shaping kernel with pre-computed scalars
                             pg_loss_max = _compute_g_loss(
                                 mb_advantage, ratio,
-                                _g_r, _g_a, _g_x0, _g_y1,
+                                _g_r, _g_a, _g_x0, _g_kappa_plus,
                             )
                             
                             pg_losses = -mb_advantage * ratio

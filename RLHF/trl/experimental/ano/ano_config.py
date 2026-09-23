@@ -105,13 +105,14 @@ class ANOConfig(TrainingArguments):
             Clip range. Reused as `epsilon` in the `G(x)` shaping function: `x0 = 1 + cliprange` is
             where the shaping function's derivative crosses zero, exactly as in vanilla PPO's
             `1 + cliprange` clip boundary.
-        ano_y1 (`float`, *optional*, defaults to `3.0`):
-            Saturation level of the `G(x)` shaping function as `x -> -infinity` (the "maximal push").
-            Must be strictly greater than `1`. This replaces the old fixed kernel used by ANO, which had
-            no independent control over this asymptote.
-        ano_b (`float`, *optional*, defaults to `-1.0`):
-            Depth of the unique minimum of the `G(x)` shaping function's derivative (the "maximal
-            pull"). Must satisfy `-ano_y1 < ano_b < 0`; this is the exact reachable range of the
+        ano_kappa_plus (`float`, *optional*, defaults to `10.0`):
+            Saturation level of the `G(x)` shaping function as `x -> -infinity` (kappa_plus, the
+            "maximal push", bounded push). Must be strictly greater than `1`. This replaces the old
+            fixed kernel used by ANO, which had no independent control over this asymptote.
+        ano_kappa_minus (`float`, *optional*, defaults to `-1.5`):
+            Depth of the unique minimum of the `G(x)` shaping function's derivative (kappa_minus,
+            the "maximal pull", bounded redescending pull). Must satisfy
+            `-ano_kappa_plus < ano_kappa_minus < 0`; this is the exact reachable range of the
             construction (see `experimental/ano/g_shaping.py`), not an arbitrary tuning limit.
         vf_coef (`float`, *optional*, defaults to `0.1`):
             Value function coefficient.
@@ -296,18 +297,19 @@ class ANOConfig(TrainingArguments):
         default=0.2,
         metadata={"help": "Clip range. Also used as epsilon in the G(x) shaping function."},
     )
-    ano_y1: float = field(
-        default=3.0,
+    ano_kappa_plus: float = field(
+        default=10.0,
         metadata={
             "help": "Saturation level of the G(x) shaping function as x -> -infinity "
-            "(the 'maximal push'). Must be > 1."
+            "(kappa_plus, the 'maximal push', bounded push). Must be > 1."
         },
     )
-    ano_b: float = field(
-        default=-1.0,
+    ano_kappa_minus: float = field(
+        default=-1.5,
         metadata={
             "help": "Depth of the unique minimum of the G(x) shaping function's derivative "
-            "(the 'maximal pull'). Must satisfy -ano_y1 < ano_b < 0."
+            "(kappa_minus, the 'maximal pull', bounded redescending pull). "
+            "Must satisfy -ano_kappa_plus < ano_kappa_minus < 0."
         },
     )
     vf_coef: float = field(

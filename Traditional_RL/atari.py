@@ -17,21 +17,25 @@ import envpool
 import wandb
 
 # ============================================================================
-# [新功能] WandB 查重工具
+# [New Feature] WandB duplicate-run check
 # ============================================================================
 def get_run_info(args):
     """
-    生成 Run Name
+    Generate Run Name
 
-    group = tag （同组实验共享一个 group，跨 seed 聚合曲线）
-    run   = tag + seed （唯一标识单次运行，用于 WandB 查重）
+    group = tag (experiments in the same group share a group; curves are
+    aggregated across seeds)
+    run   = tag + seed (uniquely identifies a single run, used for WandB
+    duplicate detection)
     """
     project_name = f"Atari_{args.game_name}_v5_G2"
 
     if args.algo == "ANO":
-        # 超参顺序: eps(epsilons[0]) / y1 / b —— 三者唯一确定 G(x) 形状
-        # :g 去掉无意义尾零（3.0→3、-1.0→-1），保持紧凑且不与分隔符 _ 混淆
-        tag = f"TANO_{args.epsilons[0]:g}_{args.ano_y1:g}_{args.ano_b:g}"
+        # Hyperparameter order: eps(epsilons[0]) / kappa_plus / kappa_minus --
+        # these three uniquely determine the shape of G(x)
+        # :g strips meaningless trailing zeros (3.0->3, -1.0->-1), keeping the
+        # tag compact and unambiguous with the _ separator
+        tag = f"TANO_{args.epsilons[0]:g}_{args.ano_kappa_plus:g}_{args.ano_kappa_minus:g}"
     elif args.algo == "TRPO":
         tag = f"TTRPO_{args.trpo_max_kl}"
     elif args.algo == "PAPO":
@@ -57,7 +61,7 @@ def check_wandb_run_exists(entity, project, group, name):
         return False
 
 # ============================================================================
-# [Wrapper 1] 原版 Wrapper (用于除 Atlantis 外的所有游戏)
+# [Wrapper 1] Original Wrapper (used for all games except Atlantis)
 # ============================================================================
 class AtariScoreWrapper_Original(gym.Wrapper):
     def __init__(self, env):
@@ -97,7 +101,7 @@ class AtariScoreWrapper_Original(gym.Wrapper):
         return obs, reward, term, trunc, info
 
 # ============================================================================
-# [Wrapper 2] 修正版 Wrapper (仅用于 Atlantis)
+# [Wrapper 2] Fixed Wrapper (used only for Atlantis)
 # ============================================================================
 class AtariScoreWrapper_Fixed(gym.Wrapper):
     def __init__(self, env):
@@ -149,64 +153,74 @@ class AtariScoreWrapper_Fixed(gym.Wrapper):
         return obs, reward, term, trunc, info
 
 # ============================================================================
-# ANO / TRPO / PAPO 核心数学工具
+# ANO / TRPO / PAPO core math utilities
 # ============================================================================
 # ============================================================================
 # [ANO] G(x) shaping kernel.
 #
-# 数学来源见 C:\Code\ICLR_ANO\show_rate.py 与 construction.tex（与
-# RLHF/experimental/ano/g_shaping.py、Traditional_RL/mujoco.py 里的实现完全
-# 一致，只是内联到这个独立脚本、并保留本文件原有的 f_func(x, side, ...) 调用
-# 形式，方便下面 term_p/term_n 的调用点不用大改）。
+# The construction is described in the paper (see paper Eq. (9) and
+# Section 4.2; the same construction appears in
+# RLHF/experimental/ano/g_shaping.py and Traditional_RL/mujoco.py, and is
+# inlined here so this standalone script keeps the original
+# f_func(x, side, ...) calling convention, so the term_p/term_n call sites
+# below do not need major changes).
 #
-# 旧核 f0 = 45/16*(0.5*logsigmoid(2x)-2*sigmoid(x)) 只有一个自由度（复用
-# epsilon）；塑形函数的角色与旧核一致：f(1)=1、f'(1)=1（切于 y=x）、且在
-# x=1+eps 处取局部极大值。这些边界条件对应的是 G(x) 本身，**不是** G'(x)：
+# The old kernel f0 = 45/16*(0.5*logsigmoid(2x)-2*sigmoid(x)) has only one
+# degree of freedom (reusing epsilon); the shaping function plays the same
+# role as the old kernel: f(1)=1, f'(1)=1 (tangent to y=x), and a local
+# maximum at x=1+eps. These boundary conditions apply to G(x) itself,
+# **not** G'(x):
 #
-#     G(x) = 1 + (y1/a) * [ bracket(a(x-x0)) - bracket(a(1-x0)) ]
-#     bracket(z) = z + log(1-u) + ((r+1)/(r-1)) * log(u+r(1-u))   (r != 1)
-#     bracket(z) = z + log(1-u) + 2*(1-u)                         (r == 1)
+#     G(x) = 1 + (kappa_plus/a) * [ bracket(a(x-x0)) - bracket(a(1-x0)) ]
+#     bracket(z) = z + log(1-u) + ((nu+1)/(nu-1)) * log(u+nu(1-u))   (nu != 1)
+#     bracket(z) = z + log(1-u) + 2*(1-u)                         (nu == 1)
 #     u = sigmoid(z)
 #
-# 三个独立超参 (eps, y1, b) 里 y1（最大推力/G'(-inf)）与 b（最大拉力/G' 的
-# 全局最小值）完全解耦。
+# Of the three independent hyperparameters (eps, kappa_plus, kappa_minus),
+# kappa_plus (max push / G'(-inf)) and kappa_minus (max pull / global minimum
+# of G') are fully decoupled.
 # ============================================================================
 
-def _g_shaping_r_of_b(y1: float, b: float) -> float:
-    """由 (y1, b) 闭式反解形状参数 r。要求 -y1 < b < 0（构造的精确可达范围）。"""
-    if not (y1 > 1.0):
-        raise ValueError(f"ano_y1 must be > 1, got {y1}")
-    if not (-y1 < b < 0.0):
-        raise ValueError(f"ano_b must satisfy -ano_y1 < ano_b < 0 (got ano_b={b}, ano_y1={y1})")
-    d = -b / y1
+def _g_shaping_r_of_kappa_minus(kappa_plus: float, kappa_minus: float) -> float:
+    """Closed-form inversion of the shape parameter nu from (kappa_plus, kappa_minus).
+    Requires -kappa_plus < kappa_minus < 0 (the exact reachable range of the construction)."""
+    if not (kappa_plus > 1.0):
+        raise ValueError(f"ano_kappa_plus must be > 1, got {kappa_plus}")
+    if not (-kappa_plus < kappa_minus < 0.0):
+        raise ValueError(f"ano_kappa_minus must satisfy -ano_kappa_plus < ano_kappa_minus < 0 (got ano_kappa_minus={kappa_minus}, ano_kappa_plus={kappa_plus})")
+    d = -kappa_minus / kappa_plus
     s = (2.0 * d + math.sqrt(2.0 * (d + 1.0))) / (1.0 - d)
     return 0.5 * (s * s - 2.0)
 
 
-def _g_shaping_a_of_scale(eps: float, y1: float, r: float) -> float:
-    """由 (eps, y1, r) 闭式解标度 a（二次方程的正根，共轭形式避免相消）。"""
+def _g_shaping_a_of_scale(eps: float, kappa_plus: float, r: float) -> float:
+    """Closed-form solution for the scale a from (eps, kappa_plus, nu)
+    (positive root of a quadratic, conjugate form to avoid cancellation)."""
     if not (eps > 0.0):
         raise ValueError(f"epsilon must be > 0, got {eps}")
-    B = r * (y1 + 1.0) + 1.0
-    C = r * (y1 - 1.0)
+    B = r * (kappa_plus + 1.0) + 1.0
+    C = r * (kappa_plus - 1.0)
     q = 2.0 * C / (B + math.sqrt(B * B + 4.0 * C))
     return -math.log(q) / eps
 
 
-def solve_g_shaping_constants(eps: float, y1: float, b: float):
-    """训练开始前调用一次：由 (eps, y1, b) 解出 (r, a, x0)。"""
-    r = _g_shaping_r_of_b(y1, b)
-    a = _g_shaping_a_of_scale(eps, y1, r)
+def solve_g_shaping_constants(eps: float, kappa_plus: float, kappa_minus: float):
+    """Call once before training: solve (nu, a, x0) from (eps, kappa_plus, kappa_minus)."""
+    r = _g_shaping_r_of_kappa_minus(kappa_plus, kappa_minus)
+    a = _g_shaping_a_of_scale(eps, kappa_plus, r)
     return r, a, 1.0 + eps
 
 
-def g_shaping_kernel(x, a, x0, y1, r):
-    """G(x)，塑形函数本身。**不是** G'(x)（早前版本在这里写错了）。
+def g_shaping_kernel(x, a, x0, kappa_plus, r):
+    """G(x), the shaping function itself. **Not** G'(x) (an earlier version
+    got this wrong).
 
-    用 u=sigmoid(z) 参数化避免 E=e^z 溢出；见上面模块头的公式，与
-    RLHF/experimental/ano/g_shaping.py 的 g_shaping_kernel 完全同构，已用
-    sympy 符号验证过对 z 求导恒等于 show_rate.py 的 G'，并数值网格对照过
-    show_rate.G()（见该文件 _selftest，100 组参数、最大相对误差 6.7e-13）。
+    Parameterize with u=sigmoid(z) to avoid E=e^z overflow; see the module
+    header formula above. Isomorphic to g_shaping_kernel in
+    RLHF/experimental/ano/g_shaping.py; symbolically verified by sympy
+    differentiation to equal the paper's G', and numerically grid-checked
+    against the reference G() (see the _selftest in that file: 100 parameter
+    sets, max relative error 6.7e-13).
     """
     z = a * (x - x0)
     z1 = a * (1.0 - x0)
@@ -226,31 +240,34 @@ def g_shaping_kernel(x, a, x0, y1, r):
         bracket = z + log_1mu + c3 * torch.log(denom)
         bracket1 = z1 + log_1mu1 + c3 * math.log(denom1)
 
-    return 1.0 + (y1 / a) * (bracket - bracket1)
+    return 1.0 + (kappa_plus / a) * (bracket - bracket1)
 
 
 def f_func(x, d, device, g_consts):
-    """保留原有调用形式：f_func(x, side, device, ...)，side=0/1 对应正/负分支。
+    """Keep the original calling convention: f_func(x, side, device, ...), side=0/1
+    for the positive/negative branch.
 
-    g_consts = ((r_pos, a_pos, x0_pos, y1_pos), (r_neg, a_neg, x0_neg, y1_neg))；
-    两侧目前用同一组 (eps, y1, b)（与旧代码用同一个 epsilons 但两侧含义相同的
-    习惯一致），调用点里的 "2 - f_func(2-x, 1, ...)" 已经做了点反射，所以这里
-    不需要像旧 f_func 那样自己再翻一次符号。
+    g_consts = ((r_pos, a_pos, x0_pos, kappa_plus_pos), (r_neg, a_neg, x0_neg, kappa_plus_neg));
+    both sides currently use the same (eps, kappa_plus, kappa_minus) (consistent
+    with the old code's habit of using the same epsilons with identical meaning
+    on both sides). The call site "2 - f_func(2-x, 1, ...)" already applies the
+    point reflection, so unlike the old f_func this function does not need to
+    flip the sign itself.
     """
-    r, a, x0, y1 = g_consts[d]
-    return g_shaping_kernel(x, a, x0, y1, r)
+    r, a, x0, kappa_plus = g_consts[d]
+    return g_shaping_kernel(x, a, x0, kappa_plus, r)
 
-# [关键修复] 使用 .reshape(-1) 替代 .view(-1) 以支持非连续 Tensor
+# [Key fix] use .reshape(-1) instead of .view(-1) to support non-contiguous tensors
 def flat_grad(grads, params):
     grad_flatten = []
     for grad in grads:
         if grad is None:
             continue
         # Fix: view size is not compatible with input tensor's size and stride
-        grad_flatten.append(grad.reshape(-1)) 
+        grad_flatten.append(grad.reshape(-1))
     return torch.cat(grad_flatten)
 
-# [关键修复] 同理，flat_params 也建议用 reshape
+# [Key fix] likewise, flat_params should also use reshape
 def flat_params(model):
     params = []
     for param in model.parameters():
@@ -292,7 +309,7 @@ def conjugate_gradient(fvp_func, b, cg_iters=10, residual_tol=1e-10):
     return x
 
 # ============================================================================
-# 网络定义 (TRPO 使用独立的 actor / critic 特征提取器)
+# Network definition (TRPO uses separate actor / critic feature extractors)
 # ============================================================================
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
@@ -303,8 +320,9 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 class Agent(nn.Module):
     def __init__(self, envs):
         super().__init__()
-        # TRPO 的信赖域只约束策略。将 actor 与 critic 完全分离，避免 value
-        # update 改变共享 CNN 后破坏已验收的 KL 约束。
+        # TRPO's trust region constrains only the policy. Keep actor and critic
+        # fully separate so value updates cannot change the shared CNN and
+        # break the already-accepted KL constraint.
         self.actor_network = nn.Sequential(
             layer_init(nn.Conv2d(4, 32, 8, stride=4)),
             nn.ReLU(),
@@ -350,7 +368,7 @@ class Agent(nn.Module):
         return self.actor(self.actor_network(x / 255.0))
 
 # ============================================================================
-# 单次训练流程 (Training Loop)
+# Single training run (Training Loop)
 # ============================================================================
 def train_one_game(args):
     project_name, group_name, run_name = get_run_info(args)
@@ -381,13 +399,13 @@ def train_one_game(args):
     # [ANO] Pre-compute G(x) shaping constants (closed form, solved once)
     # ==============================================================
     if args.algo == "ANO":
-        _g_r, _g_a, _g_x0 = solve_g_shaping_constants(args.epsilons[0], args.ano_y1, args.ano_b)
-        _g_consts = ((_g_r, _g_a, _g_x0, args.ano_y1), (_g_r, _g_a, _g_x0, args.ano_y1))
+        _g_r, _g_a, _g_x0 = solve_g_shaping_constants(args.epsilons[0], args.ano_kappa_plus, args.ano_kappa_minus)
+        _g_consts = ((_g_r, _g_a, _g_x0, args.ano_kappa_plus), (_g_r, _g_a, _g_x0, args.ano_kappa_plus))
     else:
         _g_consts = None
 
     # ==============================================================
-    # [关键分支] 仅针对 Atlantis 启用特殊修复逻辑
+    # [Key branch] Enable special fix logic only for Atlantis
     # ==============================================================
     if "Atlantis" in args.game_name:
         print(">>> Using FIXED Atlantis Logic (Max Steps + Fixed Wrapper) <<<")
@@ -517,7 +535,7 @@ def train_one_game(args):
             with torch.no_grad():
                 old_logits = agent.get_logits(b_obs)
 
-            diag_ratios = []  # [诊断] line search 评估点的 ratio
+            diag_ratios = []  # [diagnostic] ratios at line-search evaluation points
             
             policy_params = list(agent.actor_network.parameters()) + list(agent.actor.parameters())
             
@@ -575,7 +593,7 @@ def train_one_game(args):
                     new_surrogate_loss = (ratio_eval * b_advantages).mean()
                     kl_val = get_kl_discrete(agent, b_obs, old_logits).mean()
 
-                # 在 Policy Update 的 Line Search 循环中：
+                # In the Policy Update line-search loop:
                 if new_surrogate_loss > surrogate_loss and kl_val <= args.trpo_max_kl:
                     success = True
                     break
@@ -599,18 +617,19 @@ def train_one_game(args):
                     else:
                          v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
-                    # === [修复开始] ===
+                    # === [Fix start] ===
                     optimizer.zero_grad()
                     (v_loss * args.vf_coef).backward()
-                    
-                    # 裁剪 Critic 的梯度 (可选，但推荐)
+
+                    # Clip the Critic gradient (optional but recommended)
                     nn.utils.clip_grad_norm_(agent.critic.parameters(), args.max_grad_norm)
-                    
-                    # 不应清零 actor 的梯度：critic_network 与 actor_network 已分离，
-                    # 此处反向传播只会产生 critic 侧梯度。
-                    
+
+                    # Do NOT zero the actor gradient: critic_network and actor_network
+                    # are already separated, so this backward pass only produces
+                    # critic-side gradients.
+
                     optimizer.step()
-                    # === [修复结束] ===
+                    # === [Fix end] ===
             
             pg_loss, v_loss, entropy_loss, approx_kl, clipfracs = surrogate_loss, v_loss, torch.tensor(0.0), kl_val, [0.0]
 
@@ -620,7 +639,7 @@ def train_one_game(args):
         else:
             b_inds = np.arange(args.batch_size)
             clipfracs = []
-            diag_ratios = []  # [诊断] 收集本 update 所有 minibatch 的 ratio，用于分位数统计
+            diag_ratios = []  # [diagnostic] collect ratios from all minibatches of this update for quantile statistics
             continue_training = True
 
             for epoch in range(args.update_epochs):
@@ -638,7 +657,7 @@ def train_one_game(args):
 
                     with torch.no_grad():
                         approx_kl = ((ratio - 1) - logratio).mean()
-                        # ANO 的"边界"由 epsilons[0] 定义（零交叉点），而非 clip_coef
+                        # ANO's "boundary" is defined by epsilons[0] (zero-crossing point), not clip_coef
                         _out_thresh = args.epsilons[0] if args.algo == "ANO" else args.clip_coef
                         clipfracs += [((ratio - 1.0).abs() > _out_thresh).float().mean().item()]
 
@@ -746,7 +765,7 @@ def train_one_game(args):
     run.finish()
 
 # ============================================================================
-# Main 入口
+# Main entry point
 # ============================================================================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -775,10 +794,10 @@ if __name__ == "__main__":
     parser.add_argument("--cuda", type=lambda x: bool(strtobool(x)), default=True)
     parser.add_argument("--torch-deterministic", type=lambda x: bool(strtobool(x)), default=True)
     parser.add_argument("--epsilons", type=float, nargs='+', default=[0.2, 0.2])
-    parser.add_argument("--ano-y1", type=float, default=3.0,
-                         help="G(x) shaping function saturation level as x->-inf ('maximal push'); must be > 1.")
-    parser.add_argument("--ano-b", type=float, default=-1.0,
-                         help="G(x) shaping function's global min of G' ('maximal pull'); must satisfy -ano_y1 < ano_b < 0.")
+    parser.add_argument("--ano-kappa-plus", type=float, default=10.0,
+                         help="G(x) shaping function saturation level as x->-inf ('maximal push', paper kappa+); must be > 1.")
+    parser.add_argument("--ano-kappa-minus", type=float, default=-1.5,
+                         help="G(x) shaping function's global min of G' ('maximal pull', paper kappa-); must satisfy -ano_kappa_plus < ano_kappa_minus < 0.")
     parser.add_argument("--anneal-lr", type=bool, default=True)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
