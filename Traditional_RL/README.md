@@ -1,6 +1,6 @@
 # ANO
 ```
-git clone https://github.com/YihengZhang-dwbh/ANO.git
+git clone <YOUR_REPO_URL>
 cd ANO/Traditional_RL
 ```
 
