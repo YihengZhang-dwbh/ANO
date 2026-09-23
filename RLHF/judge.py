@@ -44,10 +44,13 @@ Here are the unordered outputs from the models. Each output is associated with a
 Evaluate the models on the basis of the quality and relevance of their results.
 - Reply "0" if Model 0 is better.
 - Reply "1" if Model 1 is better.
-- Reply "2" if both models are of equal quality (Tie).
+- Reply "2" if both models are of equal quality.
 
 Our evaluation will only take into account the first character of your answer, so make sure it contains only one of the identifiers (0, 1, or 2) and nothing else.
 '''
+
+#(Tie; this option should be selected only after careful consideration)
+
 
     def __init__(self, **kwargs):
         super().__init__(system_prompt=self.TIE_SUPPORT_PROMPT, **kwargs)
@@ -61,7 +64,7 @@ Our evaluation will only take into account the first character of your answer, s
             content = self.system_prompt.format(prompt=prompt, response0=candidates[0], response1=candidates[1])
             messages = [{"role": "user", "content": content}]
             try:
-                completion = self.client.chat.completions.create(model=self.model, messages=messages, max_tokens=1)
+                completion = self.client.chat.completions.create(model=self.model, messages=messages, max_tokens=1, reasoning_effort="none")
                 response = completion.choices[0].message.content.strip()
                 
                 if response in ["0", "1", "2"]:
@@ -71,6 +74,26 @@ Our evaluation will only take into account the first character of your answer, s
             except Exception as e:
                 print(f"API Error: {e}")
                 return -1
+                
+#        def get_rank(prompt, candidates):
+#            content = self.system_prompt.format(prompt=prompt, response0=candidates[0], response1=candidates[1])
+#            messages = [{"role": "user", "content": content}]
+#            try:
+#                completion = self.client.chat.completions.create(model=self.model, messages=messages, max_tokens=10, reasoning_effort="none")
+#                msg = completion.choices[0].message
+#                print(f"finish_reason={completion.choices[0].finish_reason}")
+#                print(f"content={msg.content!r}")
+#                print(f"reasoning_content={getattr(msg, 'reasoning_content', None)!r}")
+#                response = (msg.content or "").strip()
+#        
+#                import re
+#                match = re.search(r'[012]', response)
+#                if match:
+#                    return int(match.group())
+#                return -1
+#            except Exception as e:
+#                print(f"API Error: {type(e).__name__} - {e}")
+#                return -1
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
             ranks = list(executor.map(get_rank, prompts, completions))

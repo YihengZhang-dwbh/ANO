@@ -1,0 +1,16 @@
+Rubric evaluation  ANO_0.2_10_-1.5 vs PPO_0.2
+time: 2026-09-17 22:11:22
+prompts N=300, gen temp=0.0, judge=deepseek-chat (independent 1-10 rubric, JSON mode)
+====================================================================
+dimension               ANO_0.2_10_-1.5   PPO_0.2    meanD                95% CI
+relevance                    7.353     6.203    1.150   [0.873, 1.423]
+coherence                    8.530     8.143    0.387   [0.260, 0.513]
+faithfulness                 6.927     5.570    1.357   [1.030, 1.677]
+conciseness                  7.530     7.113    0.417   [0.283, 0.550]
+overall                      7.585     6.758    0.828   [0.633, 1.019]
+====================================================================
+paired per-prompt delta (A-B), N_valid=300
+Wilcoxon signed-rank p = nan | sign test p = 0.0000 (A better: 182, B better: 78)
+TOST equivalence: delta=0.5, 90% CI=[0.662, 0.990] -> not established
+mean completion chars [ANO_0.2_10_-1.5]: 192 +- 32
+mean completion chars [PPO_0.2]: 188 +- 34

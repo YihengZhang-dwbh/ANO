@@ -1,17 +1,21 @@
 temp=0
+step=500
 num=100
 
 source activate ano_trl
 
 export CUDA_VISIBLE_DEVICES=0,1
 
-ano="your_anon_checkpoint-step"
+ano=ano/checkpoint-$step
+ano_f=ano/
 
-ppo="your_ppo_checkpoint-step"
+ppo=ppo/checkpoint-$step
+ppo_f=ppo/
 
-python judge.py \
+python judge_tie.py \
     --model_a_path $ano \
     --model_b_path $ppo \
     --num_examples $num \
     --temperature $temp \
     --batch_size 16
+

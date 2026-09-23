@@ -102,7 +102,17 @@ class ANOConfig(TrainingArguments):
             estimator. Can be set to "k3", an unbiased estimator with lower variance which "appears to be a strictly
             better estimator". Cannot be set to "k2", as it is used for logging purposes.
         cliprange (`float`, *optional*, defaults to `0.2`):
-            Clip range.
+            Clip range. Reused as `epsilon` in the `G(x)` shaping function: `x0 = 1 + cliprange` is
+            where the shaping function's derivative crosses zero, exactly as in vanilla PPO's
+            `1 + cliprange` clip boundary.
+        ano_y1 (`float`, *optional*, defaults to `3.0`):
+            Saturation level of the `G(x)` shaping function as `x -> -infinity` (the "maximal push").
+            Must be strictly greater than `1`. This replaces the old fixed kernel used by ANO, which had
+            no independent control over this asymptote.
+        ano_b (`float`, *optional*, defaults to `-1.0`):
+            Depth of the unique minimum of the `G(x)` shaping function's derivative (the "maximal
+            pull"). Must satisfy `-ano_y1 < ano_b < 0`; this is the exact reachable range of the
+            construction (see `experimental/ano/g_shaping.py`), not an arbitrary tuning limit.
         vf_coef (`float`, *optional*, defaults to `0.1`):
             Value function coefficient.
         cliprange_value (`float`, *optional*, defaults to `0.2`):
@@ -270,7 +280,7 @@ class ANOConfig(TrainingArguments):
         metadata={"help": "Whether to whiten the rewards."},
     )
     kl_coef: float = field(
-        default=0.055,
+        default=0.05,
         metadata={"help": "KL coefficient."},
     )
     kl_estimator: Literal["k1", "k3"] = field(
@@ -284,7 +294,21 @@ class ANOConfig(TrainingArguments):
     )
     cliprange: float = field(
         default=0.2,
-        metadata={"help": "Clip range."},
+        metadata={"help": "Clip range. Also used as epsilon in the G(x) shaping function."},
+    )
+    ano_y1: float = field(
+        default=3.0,
+        metadata={
+            "help": "Saturation level of the G(x) shaping function as x -> -infinity "
+            "(the 'maximal push'). Must be > 1."
+        },
+    )
+    ano_b: float = field(
+        default=-1.0,
+        metadata={
+            "help": "Depth of the unique minimum of the G(x) shaping function's derivative "
+            "(the 'maximal pull'). Must satisfy -ano_y1 < ano_b < 0."
+        },
     )
     vf_coef: float = field(
         default=0.1,

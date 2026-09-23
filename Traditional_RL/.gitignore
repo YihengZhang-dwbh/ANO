@@ -1,0 +1,9 @@
+# training artifacts
+train_*.txt
+*.log
+logs/
+wandb/
+__pycache__/
+*.pyc
+.idea/
+.venv/

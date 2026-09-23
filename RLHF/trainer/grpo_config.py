@@ -606,7 +606,6 @@ class GRPOConfig(TrainingArguments):
         metadata={"help": "Number of iterations per batch (denoted as μ in the algorithm)."},
     )
     epsilon: float = field(
-        # default=0.2,
         default=0.2,
         metadata={"help": "Epsilon value for clipping."},
     )

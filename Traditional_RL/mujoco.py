@@ -18,40 +18,113 @@ import envpool
 import wandb
 
 # ============================================================================
-# [Optimization] ANO Math Kernel (JIT Compiled)
+# [ANO] G(x) shaping kernel (JIT compiled)
+#
+# 数学来源见 C:\Code\ICLR_ANO\show_rate.py 与 construction.tex（同一构造，这
+# 里是它的 torch 版，与 RLHF/experimental/ano/g_shaping.py 完全一致，只是内联
+# 到这个独立脚本里，因为它不是一个可 import 的包）。
+#
+# 旧核 f0 = 45/16*(0.5*logsigmoid(2x)-2*sigmoid(x)) 只有一个自由度（复用
+# epsilon）；塑形函数扮演的角色与旧核一致：直接替换 PPO 里 clip(ratio) 的
+# 位置，f(1)=1、f'(1)=1（切于 y=x）、且在 x=1+eps 处取**局部极大值**。这些
+# 边界条件对应的是 G(x) 本身（G(1)=1, G'(1)=1, G 在 1+eps 处局部极大），
+# **不是** G'(x)（早前版本在这里写错了，把 G' 当塑形函数塞了进去）。
+#
+#     G(x) = 1 + (y1/a) * [ bracket(a(x-x0)) - bracket(a(1-x0)) ]
+#     bracket(z) = z + log(1-u) + ((r+1)/(r-1)) * log(u+r(1-u))   (r != 1)
+#     bracket(z) = z + log(1-u) + 2*(1-u)                         (r == 1，极限)
+#     u = sigmoid(z)
+#
+# 三个独立超参 (eps, y1, b)：eps 是零点偏移（与旧核相同语义），y1 是
+# G'(-inf)（"最大推力"），b 是 G' 的全局最小值（"最大拉力"），且 b 与 y1
+# 完全解耦（不像旧核只有一个自由度）。(r, a, x0) 在训练开始前用闭式（二次
+# 方程正根 + 显式深度反解）解一次，训练循环里只做逐元素初等运算，不含任何
+# 求根，用 torch.jit.script 保持与旧核一致的性能特征。
 # ============================================================================
+
+def _g_shaping_r_of_b(y1: float, b: float) -> float:
+    """由 (y1, b) 闭式反解形状参数 r。要求 -y1 < b < 0（构造的精确可达范围）。"""
+    if not (y1 > 1.0):
+        raise ValueError(f"ano_y1 must be > 1, got {y1}")
+    if not (-y1 < b < 0.0):
+        raise ValueError(f"ano_b must satisfy -ano_y1 < ano_b < 0 (got ano_b={b}, ano_y1={y1})")
+    d = -b / y1
+    s = (2.0 * d + math.sqrt(2.0 * (d + 1.0))) / (1.0 - d)
+    return 0.5 * (s * s - 2.0)
+
+
+def _g_shaping_a_of_scale(eps: float, y1: float, r: float) -> float:
+    """由 (eps, y1, r) 闭式解标度 a（二次方程的正根，共轭形式避免相消）。"""
+    if not (eps > 0.0):
+        raise ValueError(f"epsilon must be > 0, got {eps}")
+    B = r * (y1 + 1.0) + 1.0
+    C = r * (y1 - 1.0)
+    q = 2.0 * C / (B + math.sqrt(B * B + 4.0 * C))
+    return -math.log(q) / eps
+
+
+def solve_g_shaping_constants(eps: float, y1: float, b: float):
+    """训练开始前调用一次：由 (eps, y1, b) 解出 (r, a, x0)。"""
+    r = _g_shaping_r_of_b(y1, b)
+    a = _g_shaping_a_of_scale(eps, y1, r)
+    return r, a, 1.0 + eps
+
+
 @torch.jit.script
-def _ano_math_kernel(x: torch.Tensor, k: float, b: float, const_term: float) -> torch.Tensor:
+def g_shaping_kernel(x: torch.Tensor, r: float, a: float, x0: float, y1: float) -> torch.Tensor:
+    """G(x)，塑形函数本身（替代旧 _ano_math_kernel）。**不是** G'(x)。
+
+    见上面模块头的公式；数值上用 u=sigmoid(z) 代替 E=e^z 避免溢出，
+    log(1-u) 用稳定的 -softplus(z) 求。已用 sympy 符号验证 + 数值网格
+    对照 show_rate.py（见 RLHF/experimental/ano/g_shaping.py 的 _selftest，
+    完全同构，这里为了跑在独立脚本里改成了内联版）。
     """
-    JIT compiled kernel for ANO math logic.
-    f0(x) = 45/16 * (0.5 * logsigmoid(2x) - 2 * sigmoid(x))
-    f_func = k * f0((x - b) / k) + const_term
-    """
-    term_x = (x - b) / k
-    # 45/16 = 2.8125
-    f0_val = 2.8125 * (0.5 * torch.nn.functional.logsigmoid(2 * term_x) - 2 * torch.sigmoid(term_x))
-    return k * f0_val + const_term
+    z = a * (x - x0)
+    z1 = a * (1.0 - x0)
+    u = torch.sigmoid(z)
+    u1 = 1.0 / (1.0 + math.exp(-z1))
+
+    log_1mu = -torch.nn.functional.softplus(z)
+    log_1mu1 = -math.log1p(math.exp(z1)) if z1 < 0 else -(z1 + math.log1p(math.exp(-z1)))
+
+    if abs(r - 1.0) < 1e-6:
+        bracket = z + log_1mu + 2.0 * (1.0 - u)
+        bracket1 = z1 + log_1mu1 + 2.0 * (1.0 - u1)
+    else:
+        c3 = (r + 1.0) / (r - 1.0)
+        denom = u + r * (1.0 - u)
+        denom1 = u1 + r * (1.0 - u1)
+        bracket = z + log_1mu + c3 * torch.log(denom)
+        bracket1 = z1 + log_1mu1 + c3 * math.log(denom1)
+
+    return 1.0 + (y1 / a) * (bracket - bracket1)
+
 
 @torch.jit.script
 def _compute_ano_loss(
-    mb_advantage: torch.Tensor, 
-    ratio: torch.Tensor, 
-    k_pos: float, b_pos: float, c_pos: float,
-    k_neg: float, b_neg: float, c_neg: float
+    mb_advantage: torch.Tensor,
+    ratio: torch.Tensor,
+    r: float, a: float, x0: float, y1: float,
 ) -> torch.Tensor:
     """
     Computes the ANO loss efficiently using branch selection.
+
+    与旧版完全一致的正负 Adv 分支组合方式（核心函数换成了 G，不是 G'）：
+        Adv >= 0: loss = -Adv * G(r)
+        Adv <  0: loss = -Adv * [2 - G(2-r)]
+
+    这里的常数 "2" 不需要按 y1 缩放：G 与旧核共享同一个锚点 G(1)=1，
+    对偶 g(x)=2-G(2-x) 只需 g(1)=2-G(1)=2-1=1，用常数 2 就精确满足。
     """
-    # Branch A: Positive Advantage Case -> f(r)
-    f_val_pos = _ano_math_kernel(ratio, k_pos, b_pos, c_pos)
-    
-    # Branch B: Negative Advantage Case -> 2 - f(2-r)
-    # Note: mujoco5 passes positive epsilon magnitudes for both sides, so we handle the reflection here
-    f_val_neg = 2.0 - _ano_math_kernel(2.0 - ratio, k_neg, b_neg, c_neg)
-    
+    # Branch A: Positive Advantage Case -> G(r)
+    f_val_pos = g_shaping_kernel(ratio, r, a, x0, y1)
+
+    # Branch B: Negative Advantage Case -> 2 - G(2-r)
+    f_val_neg = 2.0 - g_shaping_kernel(2.0 - ratio, r, a, x0, y1)
+
     # Selection: If Adv >= 0 use Pos branch, else use Neg branch
     target_f_val = torch.where(mb_advantage >= 0, f_val_pos, f_val_neg)
-    
+
     loss = -mb_advantage * target_f_val
     return loss.mean()
 
@@ -59,21 +132,29 @@ def _compute_ano_loss(
 # [New Feature] WandB Check
 # ============================================================================
 def get_run_info(args):
-    project_name = f"MuJoCo_{args.env_id}_G4" 
+    """
+    生成 Run Name
+
+    group = tag （同组实验共享一个 group，跨 seed 聚合曲线）
+    run   = tag + seed （唯一标识单次运行，用于 WandB 查重）
+    """
+    project_name = f"MuJoCo_{args.env_id}_G4"
 
     if args.algo == "ANO":
-        run_name = f"{args.algo}_{args.epsilons}_{args.seed}"
-        group_name = f"{args.algo}_{args.epsilons}_JIT"
+        # 超参顺序: eps(epsilons[0]) / y1 / b —— 三者唯一确定 G(x) 形状
+        # :g 去掉无意义尾零（3.0→3、-1.0→-1），保持紧凑且不与分隔符 _ 混淆
+        tag = f"TANO_{args.epsilons[0]:g}_{args.ano_y1:g}_{args.ano_b:g}"
     elif args.algo == "TRPO":
-        run_name = f"{args.algo}_{args.trpo_max_kl}_{args.seed}"
-        group_name = f"{args.algo}_{args.trpo_max_kl}"
+        tag = f"TTRPO_{args.trpo_max_kl}"
     elif args.algo == "PAPO":
-        run_name = f"{args.algo}_{args.papo_omega1}_{args.papo_omega2}_{args.seed}"
-        group_name = f"{args.algo}_{args.papo_omega1}_{args.papo_omega2}"
+        tag = f"TPAPO_{args.papo_omega1}_{args.papo_omega2}"
+    elif args.algo == "TrulyPPO":
+        tag = f"TTrulyPPO_{args.trulyppo_klrange}_{args.trulyppo_slope_rollback}_{args.trulyppo_slope_likelihood}"
     else: # PPO / SPO
-        run_name = f"{args.algo}_{args.clip_coef}_{args.seed}"
-        group_name = f"{args.algo}_{args.clip_coef}"
-        
+        tag = f"T{args.algo}_{args.clip_coef}"
+
+    group_name = tag
+    run_name = f"{tag}_{args.seed}"
     return project_name, group_name, run_name
 
 def check_wandb_run_exists(entity, project, group, name):
@@ -82,11 +163,11 @@ def check_wandb_run_exists(entity, project, group, name):
         path = f"{entity}/{project}" if entity else project
         runs = api.runs(path, filters={"group": group, "display_name": name})
         if len(runs) > 0:
-            print(f"⚠️  [Skip] Found existing run on WandB: {project}/{group}/{name}")
+            print(f"??  [Skip] Found existing run on WandB: {project}/{group}/{name}")
             return True
         return False
     except Exception as e:
-        print(f"⚠️  [WandB Check Error] {e} -> Proceeding...")
+        print(f"??  [WandB Check Error] {e} -> Proceeding...")
         return False
 
 # ============================================================================
@@ -343,29 +424,14 @@ def train_one_game(args):
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # ====================================================================
-    # [Optimization] Pre-compute ANO Constants
+    # [ANO] Pre-compute G(x) shaping constants (closed form, solved once)
     # ====================================================================
-    # We calculate these once on CPU to avoid doing it every step in the loop
     if args.algo == "ANO":
-        # Positive side (using args.epsilons[0])
-        _eps_pos = args.epsilons[0]
-        _k_pos = _eps_pos / math.log(2)
-        _b_pos = 1.0 + _eps_pos
-        _term_d_pos = (1.0 - _b_pos) / _k_pos
-        # Manually compute f0 constant for term_d
-        _f0_val_pos = 2.8125 * (0.5 * math.log(1 / (1 + math.exp(-2 * _term_d_pos))) - 2 * (1 / (1 + math.exp(-_term_d_pos))))
-        _c_pos = 1.0 - (_k_pos * _f0_val_pos)
-
-        # Negative side (using args.epsilons[1])
-        _eps_neg = args.epsilons[1]
-        _k_neg = _eps_neg / math.log(2)
-        _b_neg = 1.0 + _eps_neg
-        _term_d_neg = (1.0 - _b_neg) / _k_neg
-        _f0_val_neg = 2.8125 * (0.5 * math.log(1 / (1 + math.exp(-2 * _term_d_neg))) - 2 * (1 / (1 + math.exp(-_term_d_neg))))
-        _c_neg = 1.0 - (_k_neg * _f0_val_neg)
+        _g_r, _g_a, _g_x0 = solve_g_shaping_constants(args.epsilons[0], args.ano_y1, args.ano_b)
+        _g_y1 = args.ano_y1
     else:
         # Dummy values to prevent UnboundLocalError if algo is not ANO
-        _k_pos = _b_pos = _c_pos = _k_neg = _b_neg = _c_neg = 0.0
+        _g_r = _g_a = _g_x0 = _g_y1 = 0.0
 
     # --- Env Setup ---
     num_cpus = os.cpu_count() or 4
@@ -460,6 +526,9 @@ def train_one_game(args):
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
 
+        # [诊断] 收集本 update 所有 minibatch 的 ratio，用于分位数统计
+        diag_ratios = []
+
         # ====================================================================
         # [Branch] TRPO Logic
         # ====================================================================
@@ -489,12 +558,17 @@ def train_one_game(args):
             step_dir = conjugate_gradient(fvp_func, g, cg_iters=args.trpo_cg_iters)
 
             shs = 0.5 * (step_dir * fvp_func(step_dir)).sum(0, keepdim=True)
-            lm = torch.sqrt(shs / args.trpo_max_kl)
-            full_step = step_dir / lm[0]
-            
-            if torch.isnan(full_step).any():
-                print("TRPO Warning: NaN in full_step, skipping update.")
-                full_step = torch.zeros_like(full_step)
+            # [fix] guard the degenerate natural gradient (same bug as atari.py):
+            # g ~ 0 -> CG exits at iter 0 -> step_dir = 0 -> shs = 0 -> lm = 0
+            # -> full_step = 0/0 = NaN -> policy frozen. Skip cleanly instead.
+            if (not torch.isfinite(shs).all()) or shs.item() <= 1e-12:
+                full_step = torch.zeros_like(step_dir)
+            else:
+                lm = torch.sqrt(shs / args.trpo_max_kl)
+                full_step = step_dir / lm[0]
+                if torch.isnan(full_step).any():
+                    print("TRPO Warning: NaN in full_step, skipping update.")
+                    full_step = torch.zeros_like(full_step)
 
             current_actor_params = flat_params(agent.actor_mean)
             current_logstd = agent.actor_logstd.data.view(-1)
@@ -515,6 +589,7 @@ def train_one_game(args):
                     new_dist_eval = Normal(new_mean_eval, torch.exp(agent.actor_logstd.expand_as(new_mean_eval)))
                     new_log_probs_eval = new_dist_eval.log_prob(b_actions).sum(1)
                     ratio_eval = torch.exp(new_log_probs_eval - b_logprobs)
+                    diag_ratios.append(ratio_eval.detach())
                     new_surrogate_loss = (ratio_eval * b_advantages).mean()
                     kl_val = get_kl(agent, b_obs, old_action_mean, old_action_logstd).mean()
 
@@ -556,7 +631,7 @@ def train_one_game(args):
                     optimizer.step()
 
         # ====================================================================
-        # [Branch] PPO / ANO / SPO / PAPO Logic
+        # [Branch] PPO / ANO / SPO / PAPO / TrulyPPO Logic
         # ====================================================================
         else:
             b_inds = np.arange(args.batch_size)
@@ -564,6 +639,11 @@ def train_one_game(args):
             
             # [PAPO Early Stopping Flag]
             continue_training = True
+
+            if args.algo == "TrulyPPO":
+                with torch.no_grad():
+                    b_old_action_mean = agent.actor_mean(b_obs).clone().detach()
+                    b_old_action_logstd = agent.actor_logstd.expand_as(b_old_action_mean).clone().detach()
 
             for epoch in range(args.update_epochs):
                 if not continue_training: break # Early Stop
@@ -576,30 +656,37 @@ def train_one_game(args):
                     _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
                     logratio = newlogprob - b_logprobs[mb_inds]
                     ratio = logratio.exp()
-
-                    with torch.no_grad():
-                        old_approx_kl = (-logratio).mean()
-                        approx_kl = ((ratio - 1) - logratio).mean()
-                        clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
+                    diag_ratios.append(ratio.detach())
 
                     mb_advantages = b_advantages[mb_inds]
-                    
                     if args.norm_adv:
                         mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
                     # [ALGO SELECTOR]
                     if args.algo == "ANO":
-                        # [Optimized] Call JIT compiled kernel directly
+                        with torch.no_grad():
+                            old_approx_kl = (-logratio).mean()
+                            approx_kl = ((ratio - 1) - logratio).mean()
+                            # ANO 的"边界"由 epsilons[0] 定义（零交叉点），而非 clip_coef
+                            clipfracs += [((ratio - 1.0).abs() > args.epsilons[0]).float().mean().item()]
+                        # [Optimized] Call JIT compiled G(x) shaping kernel directly
                         pg_loss = _compute_ano_loss(
                             mb_advantages, ratio,
-                            _k_pos, _b_pos, _c_pos,
-                            _k_neg, _b_neg, _c_neg
+                            _g_r, _g_a, _g_x0, _g_y1,
                         )
                     
                     elif args.algo == "SPO":
+                        with torch.no_grad():
+                            old_approx_kl = (-logratio).mean()
+                            approx_kl = ((ratio - 1) - logratio).mean()
+                            clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
                         pg_loss = -(mb_advantages * ratio - torch.abs(mb_advantages) * torch.pow(ratio - 1, 2) / (2 * args.clip_coef)).mean()
                     
                     elif args.algo == "PAPO":
+                        with torch.no_grad():
+                            old_approx_kl = (-logratio).mean()
+                            approx_kl = ((ratio - 1) - logratio).mean()
+                            clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
                         clipped_ratio = torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
                         
                         mean_surr = torch.min(ratio * mb_advantages, clipped_ratio * mb_advantages).mean()
@@ -638,7 +725,33 @@ def train_one_game(args):
                         
                         pg_loss = -(mean_surr - args.papo_k * (mean_var_surr + var_mean_surr))
 
+                    elif args.algo == "TrulyPPO":
+                        new_action_mean = agent.actor_mean(b_obs[mb_inds])
+                        new_action_logstd = agent.actor_logstd.expand_as(new_action_mean)
+                        new_std = torch.exp(new_action_logstd)
+                        old_std = torch.exp(b_old_action_logstd[mb_inds])
+                        old_mean = b_old_action_mean[mb_inds]
+
+                        kl = new_action_logstd - b_old_action_logstd[mb_inds] + (old_std.pow(2) + (old_mean - new_action_mean).pow(2)) / (2.0 * new_std.pow(2)) - 0.5
+                        kl = kl.sum(1) # shape: [minibatch_size]
+
+                        with torch.no_grad():
+                            approx_kl = kl.mean()
+                            old_approx_kl = (-logratio).mean()
+                            clipfracs += [((kl >= args.trulyppo_klrange) & (ratio * mb_advantages > mb_advantages)).float().mean().item()]
+
+                        pg_targets = torch.where(
+                            (kl >= args.trulyppo_klrange) & (ratio * mb_advantages > mb_advantages),
+                            args.trulyppo_slope_likelihood * ratio * mb_advantages + args.trulyppo_slope_rollback * kl,
+                            ratio * mb_advantages
+                        )
+                        pg_loss = -pg_targets.mean()
+
                     else: # PPO
+                        with torch.no_grad():
+                            old_approx_kl = (-logratio).mean()
+                            approx_kl = ((ratio - 1) - logratio).mean()
+                            clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
                         pg_loss1 = -mb_advantages * ratio
                         pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
                         pg_loss = torch.max(pg_loss1, pg_loss2).mean()
@@ -674,13 +787,53 @@ def train_one_game(args):
             if args.algo != "PAPO" and args.target_kl is not None and approx_kl > args.target_kl:
                 break
 
+        # ====================================================================
+        # [Logging] Per-update metrics (losses + gain-field diagnostics)
+        # ====================================================================
+        with torch.no_grad():
+            if len(diag_ratios) > 0:
+                r_all = torch.cat(diag_ratios).float()
+                _q = torch.quantile(r_all, torch.tensor([0.5, 0.9, 0.99, 0.999], device=r_all.device))
+                _q50, _q90, _q99, _q999 = (v.item() for v in _q)
+            else:
+                _q50 = _q90 = _q99 = _q999 = float("nan")
+
+            _payload = {
+                "charts/learning_rate": optimizer.param_groups[0]["lr"],
+                "diagnostics/ratio_q50": _q50,
+                "diagnostics/ratio_q90": _q90,
+                "diagnostics/ratio_q99": _q99,
+                "diagnostics/ratio_q999": _q999,
+                "global_step": global_step,
+            }
+            if args.algo == "TRPO":
+                _payload["losses/approx_kl"] = kl_val.item()
+                _payload["diagnostics/trpo_step_accepted"] = float(success)
+            else:
+                _payload["losses/value_loss"] = v_loss.item()
+                _payload["losses/policy_loss"] = pg_loss.item()
+                _payload["losses/entropy"] = entropy_loss.item()
+                _payload["losses/approx_kl"] = approx_kl.item()
+                _payload["diagnostics/out_of_boundary"] = (
+                    float(np.mean(clipfracs)) if len(clipfracs) > 0 else float("nan")
+                )
+            wandb.log(_payload)
+
+        if global_step % 100000 == 0:
+            print(f"Env: {args.env_id} | Step: {global_step} | SPS: {int(global_step / (time.time() - start_time))}")
+
     envs.close()
     writer.close()
     run.finish()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--algo", type=str, default="PPO", help="Options: PPO, ANO, SPO, TRPO, PAPO")
+    parser.add_argument("--algo", type=str, default="PPO", help="Options: PPO, ANO, SPO, TRPO, PAPO, TrulyPPO")
+    
+    # [TrulyPPO Hyperparameters]
+    parser.add_argument("--trulyppo-klrange", type=float, default=0.03, help="TrulyPPO KLRANGE")
+    parser.add_argument("--trulyppo-slope-rollback", type=float, default=-5.0, help="TrulyPPO slope_rollback")
+    parser.add_argument("--trulyppo-slope-likelihood", type=float, default=1.0, help="TrulyPPO slope_likelihood")
     
     # [PAPO Hyperparameters]
     parser.add_argument("--papo-k", type=float, default=7.0, help="Probability factor k")
@@ -707,12 +860,16 @@ if __name__ == "__main__":
     parser.add_argument("--cuda", type=lambda x: bool(strtobool(x)), default=True)
     parser.add_argument("--torch-deterministic", type=lambda x: bool(strtobool(x)), default=True)
     parser.add_argument("--epsilons", type=float, nargs='+', default=[0.2, 0.2])
+    parser.add_argument("--ano-y1", type=float, default=3.0,
+                         help="G(x) shaping function saturation level as x->-inf ('maximal push'); must be > 1.")
+    parser.add_argument("--ano-b", type=float, default=-1.0,
+                         help="G(x) shaping function's global min of G' ('maximal pull'); must satisfy -ano_y1 < ano_b < 0.")
     parser.add_argument("--anneal-lr", type=bool, default=True)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--norm-adv", type=bool, default=True)
     parser.add_argument("--clip-coef", type=float, default=0.3)
-    parser.add_argument("--clip-vloss", type=bool, default=True)
+    parser.add_argument("--clip-vloss", type=bool, default=False)
     parser.add_argument("--ent-coef", type=float, default=0.0)
     parser.add_argument("--vf-coef", type=float, default=0.5)
     parser.add_argument("--max-grad-norm", type=float, default=0.5)

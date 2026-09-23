@@ -1,3 +1,17 @@
+# Copyright 2020-2026 The HuggingFace Team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import asyncio
 import atexit
 import copy
@@ -57,7 +71,7 @@ from ..models import prepare_deepspeed, prepare_fsdp, unwrap_model_for_generatio
 from ..models.utils import _ForwardRedirection, disable_gradient_checkpointing
 from .base_trainer import BaseTrainer
 from .callbacks import SyncRefModelCallback
-from .gano_config import GANOConfig
+from .grpo_config import GRPOConfig
 from .utils import (
     RepeatSampler,
     create_model_from_path,
@@ -81,53 +95,12 @@ from .utils import (
     use_adapter,
 )
 
-import math  # 确保已导入 math
-
-# ================= ADDED ANO KERNELS START =================
-@torch.jit.script
-def _ano_math_kernel(x: torch.Tensor, k: float, b: float, const_term: float) -> torch.Tensor:
-    """
-    JIT compiled kernel for ANO math logic.
-    f0(x) = 45/16 * (0.5 * logsigmoid(2x) - 2 * sigmoid(x))
-    f_func = k * f0((x - b) / k) + const_term
-    """
-    term_x = (x - b) / k
-    # Note: 45/16 = 2.8125
-    f0_val = 2.8125 * (0.5 * torch.nn.functional.logsigmoid(2 * term_x) - 2 * torch.sigmoid(term_x))
-    return k * f0_val + const_term
-
-@torch.jit.script
-def _compute_ano_loss(
-    mb_advantage: torch.Tensor, 
-    ratio: torch.Tensor, 
-    k_pos: float, b_pos: float, c_pos: float,
-    k_neg: float, b_neg: float, c_neg: float
-) -> torch.Tensor:
-    """
-    Computes the masked ANO loss logic replacing standard PPO clipping.
-    """
-    # Branch A: f(r) using positive epsilon params
-    f_val_pos = _ano_math_kernel(ratio, k_pos, b_pos, c_pos)
-    
-    # Branch B: f(2-r) using negative epsilon params
-    f_val_neg = 2.0 - _ano_math_kernel(2 - ratio, k_neg, b_neg, c_neg)
-    
-    # Select function value based on sign of advantage
-    target_f_val = torch.where(mb_advantage >= 0, f_val_pos, f_val_neg)
-    
-    # Final Loss = -Adv * Function_Value
-    loss = -mb_advantage * target_f_val
-    return loss
-# ================= ADDED ANO KERNELS END =================
-
-# ... [Rest of the file] ...
-
 
 if is_peft_available():
     from peft import PeftConfig, PeftModel, get_peft_model
 
 if is_liger_kernel_available():
-    from liger_kernel.chunked_loss import LigerFusedLinearGRPOLoss as LigerFusedLinearGANOLoss
+    from liger_kernel.chunked_loss import LigerFusedLinearGRPOLoss
 
 if is_vllm_available():
     import vllm
@@ -156,25 +129,25 @@ RewardFunc = str | PreTrainedModel | Callable[[list, list], list[float]]
 # What we call a rollout function is a callable that takes prompts (list) and the trainer instance as parameters and
 # returns a dict of generation results. Those results must include "prompt_ids", "completion_ids", and "logprobs"
 # fields. Any extra fields (per-completion) are forwarded to the reward functions.
-RolloutFunc = Callable[[list[str], "GANOTrainer"], dict[str, Any]]
+RolloutFunc = Callable[[list[str], "GRPOTrainer"], dict[str, Any]]
 
 
-class GANOTrainer(BaseTrainer):
+class GRPOTrainer(BaseTrainer):
     """
-    Trainer for the Group Relative Policy Optimization (GANO) method. This algorithm was initially proposed in the
+    Trainer for the Group Relative Policy Optimization (GRPO) method. This algorithm was initially proposed in the
     paper [DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language
     Models](https://huggingface.co/papers/2402.03300).
 
     Example:
 
     ```python
-    from trl import GANOTrainer
+    from trl import GRPOTrainer
     from trl.rewards import accuracy_reward
     from datasets import load_dataset
 
     dataset = load_dataset("trl-lib/DeepMath-103K", split="train")
 
-    trainer = GANOTrainer(
+    trainer = GRPOTrainer(
         model="Qwen/Qwen2.5-0.5B-Instruct",
         reward_funcs=accuracy_reward,
         train_dataset=dataset,
@@ -218,7 +191,7 @@ class GANOTrainer(BaseTrainer):
                   reward function's signature.
             - A list of reward functions, where each item can independently be any of the above types. Mixing different
             types within the list (e.g., a string model ID and a custom reward function) is allowed.
-        args ([`GANOConfig`], *optional*):
+        args ([`GRPOConfig`], *optional*):
             Configuration for this trainer. If `None`, a default configuration is used.
         train_dataset ([`~datasets.Dataset`] or [`~datasets.IterableDataset`]):
             Dataset to use for training. It must include a column `"prompt"`. Any additional columns in the dataset is
@@ -269,8 +242,8 @@ class GANOTrainer(BaseTrainer):
             and may change or be removed at any time without prior notice.
     """
 
-    _tag_names = ["trl", "gano"]
-    _name = "GANO"
+    _tag_names = ["trl", "grpo"]
+    _name = "GRPO"
     _paper = {
         "title": "DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models",
         "id": "2402.03300",
@@ -289,7 +262,7 @@ class GANOTrainer(BaseTrainer):
         self,
         model: "str | PreTrainedModel | PeftModel",
         reward_funcs: RewardFunc | list[RewardFunc],
-        args: GANOConfig | None = None,
+        args: GRPOConfig | None = None,
         train_dataset: Dataset | IterableDataset | None = None,
         eval_dataset: Dataset | IterableDataset | dict[str, Dataset | IterableDataset] | None = None,
         processing_class: PreTrainedTokenizerBase | ProcessorMixin | None = None,
@@ -304,19 +277,19 @@ class GANOTrainer(BaseTrainer):
         if args is None:
             model_name = model if isinstance(model, str) else get_config_model_id(model.config)
             model_name = model_name.split("/")[-1]
-            args = GANOConfig(f"{model_name}-GANO")
+            args = GRPOConfig(f"{model_name}-GRPO")
 
         # Model
         if isinstance(model, str):
             model_init_kwargs = args.model_init_kwargs or {}
-            # Special case for DeepSpeed: requires device_map=None ("auto" fails)
-            if args.distributed_state.distributed_type == "DEEPSPEED":
+            # Distributed training requires device_map=None ("auto" fails)
+            if args.distributed_state.distributed_type in ["MULTI_GPU", "DEEPSPEED"]:
                 model_init_kwargs["device_map"] = None
             model = create_model_from_path(model, **model_init_kwargs)
         else:
             if args.model_init_kwargs is not None:
                 logger.warning(
-                    "You passed `model_init_kwargs` to the `GANOConfig`, but your model is already instantiated. "
+                    "You passed `model_init_kwargs` to the `GRPOConfig`, but your model is already instantiated. "
                     "The `model_init_kwargs` will be ignored."
                 )
 
@@ -358,7 +331,7 @@ class GANOTrainer(BaseTrainer):
 
         if is_peft_available() and is_peft_model(model) and self.args.beta != 0.0:
             # If the model is a PEFT model with a pretrained adapter, we need to create a "ref" adapter that is a copy
-            # of the "default" adapter, so that we can use it as the reference model during GANO training.
+            # of the "default" adapter, so that we can use it as the reference model during GRPO training.
             model.add_adapter("ref", model.peft_config["default"])
             for name, param in model.named_parameters():
                 if ".default." in name:
@@ -407,7 +380,7 @@ class GANOTrainer(BaseTrainer):
         self._has_async_reward_funcs = any(asyncio.iscoroutinefunction(func) for func in self.reward_funcs)
         if self._has_async_reward_funcs:
             self.async_reward_loop_thread, self.async_reward_loop, self.async_reward_loop_ready_event = (
-                start_event_loop_in_daemon(name="GANOTrainer-AsyncRewardLoop")
+                start_event_loop_in_daemon(name="GRPOTrainer-AsyncRewardLoop")
             )
             # wait until the event loop is running in the daemon thread
             self.async_reward_loop_ready_event.wait()
@@ -465,12 +438,12 @@ class GANOTrainer(BaseTrainer):
         if tools:
             if not Version(transformers.__version__) >= Version("5.0.0.dev0"):
                 raise ImportError(
-                    "Using tools with GANOTrainer requires transformers version 5.0.0 or higher. Please use "
+                    "Using tools with GRPOTrainer requires transformers version 5.0.0 or higher. Please use "
                     "transformers with `pip install --pre transformers` to use this feature."
                 )
             if not is_jmespath_available():
                 raise ImportError(
-                    "Using tools with GANOTrainer requires the jmespath library for response parsing. Please install "
+                    "Using tools with GRPOTrainer requires the jmespath library for response parsing. Please install "
                     "it with `pip install jmespath` to use this feature."
                 )
         self.tools = tools
@@ -490,8 +463,8 @@ class GANOTrainer(BaseTrainer):
             self.chat_template = None
 
         # Training arguments
-        self.max_completion_length = args.max_completion_length  # = |o_i| in the GANO paper
-        self.num_generations = args.num_generations  # = G in the GANO paper
+        self.max_completion_length = args.max_completion_length  # = |o_i| in the GRPO paper
+        self.num_generations = args.num_generations  # = G in the GRPO paper
         self.num_generations_eval = args.num_generations_eval or self.num_generations
         self.chat_template_kwargs = args.chat_template_kwargs or {}
         self.temperature = args.temperature
@@ -538,7 +511,7 @@ class GANOTrainer(BaseTrainer):
         ):
             # See https://github.com/huggingface/trl/issues/3213
             raise NotImplementedError(
-                "Iterable datasets are not yet supported in GANOTrainer. Please use a standard dataset instead."
+                "Iterable datasets are not yet supported in GRPOTrainer. Please use a standard dataset instead."
             )
 
         if args.loss_type == "sapo" and (args.sapo_temperature_neg is None or args.sapo_temperature_pos is None):
@@ -547,7 +520,7 @@ class GANOTrainer(BaseTrainer):
             )
 
         # Multi-step
-        self.num_iterations = args.num_iterations  # = 𝜇 in the GANO paper
+        self.num_iterations = args.num_iterations  # = 𝜇 in the GRPO paper
         self.epsilon_low = args.epsilon
         self.epsilon_high = args.epsilon_high if args.epsilon_high is not None else args.epsilon
         # Tracks the number of iterations (forward + backward passes), including those within a grad accum cycle
@@ -557,7 +530,7 @@ class GANOTrainer(BaseTrainer):
         self._buffered_inputs = None
 
         # The trainer estimates the number of FLOPs (floating-point operations) using the number of elements in the
-        # input tensor associated with the key "input_ids". However, in GANO, the sampled data does not include the
+        # input tensor associated with the key "input_ids". However, in GRPO, the sampled data does not include the
         # "input_ids" key. Instead, the available keys is "prompt". As a result, the trainer issues the warning:
         # "Could not estimate the number of tokens of the input, floating-point operations will not be computed." To
         # suppress this warning, we set the "estimate_tokens" key in the model's "warnings_issued" dictionary to True.
@@ -567,7 +540,7 @@ class GANOTrainer(BaseTrainer):
         super().__init__(
             model=model,
             args=args,
-            data_collator=identity,  # No data collation is needed in GANO
+            data_collator=identity,  # No data collation is needed in GRPO
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
             processing_class=processing_class,
@@ -636,12 +609,12 @@ class GANOTrainer(BaseTrainer):
         if self.use_liger_kernel:
             if not is_liger_kernel_available():
                 raise ImportError(
-                    "Liger is required to use `use_liger_kernel` as the GANO loss. Run `pip install liger-kernel`."
+                    "Liger is required to use `use_liger_kernel` as the GRPO loss. Run `pip install liger-kernel`."
                 )
             # redirect the model.module forward to the model forward to ensure pre-forward hooks are called
             self._forward_redirection = _ForwardRedirection()
 
-            self.liger_gano_loss = LigerFusedLinearGANOLoss(
+            self.liger_grpo_loss = LigerFusedLinearGRPOLoss(
                 beta=self.beta,
                 epsilon_low=self.epsilon_low,
                 epsilon_high=self.epsilon_high,
@@ -809,7 +782,7 @@ class GANOTrainer(BaseTrainer):
     def _set_signature_columns_if_needed(self):
         # If `self.args.remove_unused_columns` is True, non-signature columns are removed.
         # By default, this method sets `self._signature_columns` to the model's expected inputs (usually, "input_ids"
-        # and "attention_mask"). In GANOTrainer, we preprocess data, so using the model's signature columns doesn't
+        # and "attention_mask"). In GRPOTrainer, we preprocess data, so using the model's signature columns doesn't
         # work. Instead, we set them to the columns expected by the `training_step` method, hence the override.
         if self._signature_columns is None:
             self._signature_columns = ["prompt", "image", "images"]
@@ -822,7 +795,7 @@ class GANOTrainer(BaseTrainer):
     # `steps_per_generation`. Thus, `_prepare_inputs` is called with this *generation* batch, and it handles the
     # splitting internally.
     # Maintenance note: This method is a copy-paste of the original `Trainer.get_train_dataloader` with only one line
-    # modification. As a result, some parts of the method aren't relevant to GANO, but we keep them to stay one line
+    # modification. As a result, some parts of the method aren't relevant to GRPO, but we keep them to stay one line
     # apart from the super method, ensuring easier maintenance in the future.
     def get_train_dataloader(self):
         if self.train_dataset is None:
@@ -1217,7 +1190,6 @@ class GANOTrainer(BaseTrainer):
         mode = "train" if self.model.training else "eval"
         if mode == "train":
             generate_every = self.args.steps_per_generation * self.num_iterations
-            
             if self._step % generate_every == 0 or self._buffered_inputs is None:
                 # self._buffered_inputs=None can occur when resuming from a checkpoint
                 generation_batch = self._generate_and_score_completions(generation_batch)
@@ -1945,7 +1917,7 @@ class GANOTrainer(BaseTrainer):
             # When using vLLM, we always compute old_per_token_logps for importance sampling, it was shown that the
             # distribution mismatch between vLLM and the training model can be large and harm the training.
             generate_every = self.args.steps_per_generation * self.num_iterations  # generation frequency
-            if self.beta != 0.0 or self.args.gradient_accumulation_steps % generate_every != 0 or (
+            if self.args.gradient_accumulation_steps % generate_every != 0 or (
                 self.use_vllm and self.vllm_importance_sampling_correction
             ):
                 old_per_token_logps, _ = self._get_per_token_logps_and_entropies(
@@ -1955,7 +1927,7 @@ class GANOTrainer(BaseTrainer):
                     logits_to_keep,
                     batch_size,
                     num_images=num_images,
-                    **forward_kwargs,
+                    **forward_kwargs,  # may contain pixel_values, image_grid_thw, pixel_attention_mask and image_sizes
                 )
             else:
                 old_per_token_logps = None
@@ -2042,12 +2014,6 @@ class GANOTrainer(BaseTrainer):
         # Apply weights to each reward function's output and sum
         rewards = (rewards_per_func * self.reward_weights.to(device).unsqueeze(0)).nansum(dim=1)
 
-        if self.beta != 0.0 and ref_per_token_logps is not None and old_per_token_logps is not None:
-            per_token_kl = old_per_token_logps - ref_per_token_logps
-            per_token_kl = per_token_kl * completion_mask
-            kl_penalty = per_token_kl.sum(dim=1)
-            rewards = rewards - self.beta * kl_penalty
-          
         # Compute grouped-wise rewards
         num_generations = self.num_generations if mode == "train" else self.num_generations_eval
         mean_grouped_rewards = rewards.view(-1, num_generations).mean(dim=1)
@@ -2193,8 +2159,8 @@ class GANOTrainer(BaseTrainer):
             inputs.get("image_sizes"),
         )
 
-        # compute loss and metrics using liger gano loss
-        loss, metrics = self.liger_gano_loss(
+        # compute loss and metrics using liger grpo loss
+        loss, metrics = self.liger_grpo_loss(
             _input=last_hidden_state,
             lin_weight=unwrapped_model.lm_head.weight,
             selected_token_ids=completion_ids,
@@ -2204,6 +2170,8 @@ class GANOTrainer(BaseTrainer):
             old_per_token_logps=inputs.get("old_per_token_logps"),
             ref_per_token_logps=inputs.get("ref_per_token_logps"),
         )
+        # Extract metrics from the liger_grpo_loss output
+        # KL divergence is the first metric when beta is non-zero
         mean_kl = metrics[0] if self.beta != 0.0 else None
         clip_ratio = metrics[-1]
 
@@ -2216,9 +2184,9 @@ class GANOTrainer(BaseTrainer):
     @profiling_decorator
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         if return_outputs:
-            raise ValueError("The GANOTrainer does not support returning outputs")
+            raise ValueError("The GRPOTrainer does not support returning outputs")
         if self.use_liger_kernel:
-            # Compute the loss using the liger gano loss
+            # Compute the loss using the liger grpo loss
             unwrapped_model = self.accelerator.unwrap_model(model)
             return self._forward_redirection(model, unwrapped_model, self.compute_liger_loss, unwrapped_model, inputs)
         else:
@@ -2284,7 +2252,7 @@ class GANOTrainer(BaseTrainer):
 
         # Compute the loss
         advantages = inputs["advantages"]
-        # In the base GANO implementation, advantages are expected to have shape (B,). To support subclasses that
+        # In the base GRPO implementation, advantages are expected to have shape (B,). To support subclasses that
         # provide advantages with shape (B, T) (e.g., MiniLLM), we *conditionally* unsqueeze the tensor.
         if advantages.dim() == 1:
             advantages = advantages.unsqueeze(1)
@@ -2329,33 +2297,20 @@ class GANOTrainer(BaseTrainer):
             if self.args.use_bias_correction_kl:
                 per_token_kl = per_token_kl * coef_1
 
-        if self.loss_type in ["gano", "bnpo", "dr_gano", "dapo"]:
-            
-            # --- Positive Branch Constants ---
-            _eps_pos = self.epsilon_high
-            _k_pos = _eps_pos / math.log(2)
-            _b_pos = 1 + _eps_pos
-            _term_d_pos = (1.0 - _b_pos) / _k_pos
-            _f0_d_pos = 2.8125 * (0.5 * math.log(1 / (1 + math.exp(-2 * _term_d_pos))) - 2 * (1 / (1 + math.exp(-_term_d_pos))))
-            _ds_d_pos = _k_pos * _f0_d_pos
-            _const_term_pos = 1 - _ds_d_pos
+        # From here, log_importance_weights (and all subsequent tensors, coef_1, coef_2, etc.) shape depends on
+        # importance_sampling_level: "token" level: (B, T); "sequence" level: (B, 1)
+        if self.loss_type == "cispo":
+            clamped_ratios = torch.clamp(coef_1, max=self.epsilon_high).detach()
+            per_token_loss = -clamped_ratios * advantages * per_token_logps
+        elif self.loss_type in ["grpo", "bnpo", "dr_grpo", "dapo"]:
+            coef_2 = torch.clamp(coef_1, 1 - self.epsilon_low, 1 + self.epsilon_high)
+            # Two-sided clipping
+            if self.args.delta is not None:
+                coef_1 = torch.clamp(coef_1, max=self.args.delta)
 
-            # --- Negative Branch Constants ---
-            _eps_neg = -self.epsilon_low 
-            _k_neg = _eps_neg / math.log(2)
-            _b_neg = 1 + _eps_neg
-            _term_d_neg = (1.0 - _b_neg) / _k_neg
-            _f0_d_neg = 2.8125 * (0.5 * math.log(1 / (1 + math.exp(-2 * _term_d_neg))) - 2 * (1 / (1 + math.exp(-_term_d_neg))))
-            _ds_d_neg = _k_neg * _f0_d_neg
-            _const_term_neg = 1 - _ds_d_neg
-
-            per_token_loss = _compute_ano_loss(
-                mb_advantage=advantages,
-                ratio=coef_1,
-                k_pos=_k_pos, b_pos=_b_pos, c_pos=_const_term_pos,
-                k_neg=_k_neg, b_neg=_b_neg, c_neg=_const_term_neg
-            )
-            
+            per_token_loss1 = coef_1 * advantages
+            per_token_loss2 = coef_2 * advantages
+            per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
         elif self.loss_type == "sapo":
             per_token_loss = torch.empty_like(coef_1)
             positive_advantages_mask = advantages.repeat([1, coef_1.shape[1]]) > 0
@@ -2378,13 +2333,16 @@ class GANOTrainer(BaseTrainer):
         if self.use_vllm and self.vllm_importance_sampling_correction:
             per_token_loss = per_token_loss * inputs["importance_sampling_ratio"]
 
-        if self.loss_type in ["gano", "sapo"]:
+        if self.beta != 0.0:
+            per_token_loss = per_token_loss + self.beta * per_token_kl
+
+        if self.loss_type in ["grpo", "sapo"]:
             loss = ((per_token_loss * mask).sum(-1) / mask.sum(-1).clamp(min=1.0)).mean()
             loss = loss / self.current_gradient_accumulation_steps
         elif self.loss_type == "bnpo":
             loss = (per_token_loss * mask).sum() / mask.sum().clamp(min=1.0)
             loss = loss / self.current_gradient_accumulation_steps
-        elif self.loss_type == "dr_gano":
+        elif self.loss_type == "dr_grpo":
             loss = (per_token_loss * mask).sum() / (per_token_loss.size(0) * self.max_completion_length)
             loss = loss / self.current_gradient_accumulation_steps
         elif self.loss_type in ["cispo", "dapo"]:
@@ -2411,7 +2369,7 @@ class GANOTrainer(BaseTrainer):
         mean_entropy = masked_batch_mean(entropies)
         self._metrics[mode]["entropy"].append(self.accelerator.gather(mean_entropy).nanmean().item())
 
-        if self.loss_type in ["gano", "bnpo", "dr_gano", "dapo"]:
+        if self.loss_type in ["grpo", "bnpo", "dr_grpo", "dapo"]:
             # Compute the clipped probability ratios
             is_low_clipped = (coef_1 < 1 - self.epsilon_low) & (advantages < 0)
             is_high_clipped = (coef_1 > 1 + self.epsilon_high) & (advantages > 0)
