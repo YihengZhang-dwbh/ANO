@@ -106,7 +106,7 @@ bash bash_judge_rubric.sh   # LLM-judge evaluation of the trained checkpoints
 @inproceedings{Anonymous2027ano,
   title     = {ANO: Robust Policy Optimization via Bounded, Redescending Gain Fields},
   author    = {Anonymous authors},
-  booktitle = {Under review at ICLR 2027},
+  booktitle = {Under review},
   year      = {2027}
 }
 ```
